@@ -1,0 +1,19 @@
+{
+  "_comment": "Stage 1: coarse-to-fine distillation of the final adapter (teacher: SAM ViT-H image embedding). Manifests from fs-dino-hq make-distill-split.",
+  "adapter": "final",
+  "train_manifest": "${DATA_DIR}/unlabelled/split/train.txt",
+  "val_manifest": "${DATA_DIR}/unlabelled/split/val.txt",
+  "image_root": "${DATA_DIR}/unlabelled/images",
+  "dino_ckpt": "${WEIGHTS_DIR}/dinov2_vitb14_pretrain.pth",
+  "sam_ckpt": "${WEIGHTS_DIR}/sam_vit_h_4b8939.pth",
+  "save_dir": "${OUTPUT_DIR}/distill_final_adapter",
+  "stages": "126:8,252:8,518:14",
+  "batch_size": 4,
+  "lr": 0.0005,
+  "weight_decay": 0.0001,
+  "warmup_epochs": 1,
+  "num_workers": 6,
+  "seed": 42,
+  "diag_res": 518,
+  "dino_block_index": 2
+}

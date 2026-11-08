@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# Model weights, datasets and run outputs are never committed
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.npy
+*.npz
+/weights/
+/data/
+/runs/
+/outputs/
+# working folders used in the documentation examples
+/supports/
+/queries/
+/predictions/
+/pool/
+/splits/
+/demo/
+
+# Job logs (may contain absolute paths, job ids and hardware identifiers)
+*.out
+*.err
+*.log
+/logs/
+
+# Local settings
+.env
+.env.*
+.idea/
+.vscode/
+.DS_Store

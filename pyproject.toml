@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fs-dino-hq"
+version = "0.1.0"
+description = "Few-shot segmentation from annotated support images with DINOv2 features, an FS-DINO style prompt generator, the SAM mask decoder and an HQ-SAM style refinement branch"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "numpy>=1.24",
+    "Pillow>=9.0",
+    "scipy>=1.10",
+    # SAM prompt encoder and mask decoder; SAM ViT-H image encoder (distillation teacher)
+    "segment-anything @ git+https://github.com/facebookresearch/segment-anything.git@dca509fe793f601edb92606367a655c15ac00fdf",
+]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.7"]
+dev = ["pytest>=7", "matplotlib>=3.7"]
+
+[project.scripts]
+fs-dino-hq = "fs_dino_hq.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
