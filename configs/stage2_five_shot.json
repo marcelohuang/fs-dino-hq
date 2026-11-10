@@ -1,5 +1,5 @@
 {
-  "_comment": "Stage 2, five supports per episode (released configuration). Plans from fs-dino-hq make-episodes (docs/data.md). Select afterwards with fs-dino-hq select-stage2.",
+  "_comment": "Stage 2, five supports per episode (reported configuration). Plans from fs-dino-hq make-episodes (docs/data.md). Select afterwards with fs-dino-hq select-stage2.",
   "synthetic_root": "${DATA_DIR}/synthetic",
   "train_plan": "${DATA_DIR}/episodes/train_episode_plan_5shot_8cyc.csv",
   "n_shot": 5,

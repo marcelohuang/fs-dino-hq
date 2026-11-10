@@ -2,7 +2,7 @@
 
 All numbers below come from single training runs of the configurations in
 `configs/` (seed 42) and from one fixed evaluation protocol. They are
-reported to document what the released code produced; they are not benchmark
+reported to document what this code produced; they are not benchmark
 claims. The data behind them are not distributed with this repository, so the
 real-photo numbers cannot be reproduced without access to the same images.
 
@@ -28,7 +28,7 @@ real-photo numbers cannot be reproduced without access to the same images.
 
 * One reused evaluation set. The same 46 queries were used to compare the
   variants explored during development, including the choice of the five-shot
-  Stage 2 configuration released here. Results on this set are therefore
+  Stage 2 configuration reported here. Results on this set are therefore
   optimistic as an estimate for new images.
 * Partial annotations. Bars that are visible but not annotated count as
   background, so correct predictions on them are counted as false positives.
@@ -48,6 +48,12 @@ real-photo numbers cannot be reproduced without access to the same images.
   seeds was not measured.
 * One support set. Every result uses the same five supports; the sensitivity
   to the choice of supports was not measured.
+* Dependence on the supports. In every training episode the supports and the
+  query show the same kind of object, so training never requires the supports
+  to decide what the foreground is, and how much the output of the trained
+  model changes with the supports has not been measured. On the synthetic
+  validation set the Stage 2 model scored nearly the same with one support as
+  with five (decoder IoU 0.790 and 0.791 at the last epoch).
 * Checkpoint choice. The HQ checkpoint is the one with the lowest validation
   loss among ten validated epochs. That loss compares the logits with the
   query mask resized to 256 x 256 by nearest-neighbour index, which places the
@@ -105,15 +111,34 @@ checkpoint is epoch 40 (full-validation loss 0.2171).
 The two losses differ in more than the sampling of points: the point-sampled
 loss reads a 1024 x 1024 target at the positions at which it reads the
 logits, whereas the full-grid loss uses a 256 x 256 target that is coarser
-and about half a cell off the logit grid (see
+and displaced by about half a cell relative to the logit grid (see
 [implementation_notes.md](implementation_notes.md#hq-branch)); the Dice
 smoothing constants also differ. The gain can therefore not be attributed to
-point sampling alone. The reported model recovers more of the annotated bars
-(higher recall on thin structures) and produces more small separate
-components (higher fragmentation). The validation losses of the two runs are
-on the same scale but not comparable as a ranking of the two losses: the
-control is trained on the validation target, the reported model on the
-1024 x 1024 one.
+point sampling.
+
+Most of it appears to come from the alignment of the target. Translating the
+saved probability maps by half a logit cell towards the upper left, the
+correction that the displaced target predicts, and thresholding them again
+gives (same 46 queries; a test on saved outputs, no retraining):
+
+| Output | IoU as predicted | IoU translated by -0.5 cell | Difference [95 % interval] |
+|---|---|---|---|
+| Full-grid control | 0.4086 | 0.4152 | +0.0066 [+0.0010, +0.0128] |
+| Point-sampled (reported) | 0.4171 | 0.3989 | -0.0181 [-0.0232, -0.0130] |
+| Stage 2 base | 0.4050 | 0.4089 | +0.0039 [-0.0012, +0.0096] |
+
+The reported model is centred (any translation lowers its IoU), whereas the
+control and the Stage 2 base, both trained on the displaced 256 x 256
+target, improve when moved back. Against the translated control the reported
+model leads by +0.0018 [0.0000, +0.0036] instead of +0.0084. A control
+trained with a centred full-grid target would be the direct test; it has not
+been run.
+
+The reported model also recovers more of the annotated bars (higher recall
+on thin structures) and produces more small separate components (higher
+fragmentation). The validation losses of the two runs are on the same scale
+but do not rank the two losses: the control is trained on the validation
+target, the reported model on the 1024 x 1024 one.
 
 ## Five-shot versus one-shot Stage 2 training
 

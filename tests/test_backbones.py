@@ -106,7 +106,3 @@ def test_load_reads_weights_and_passes_hub_repo(hub, tmp_path):
     for k, v in ref.state_dict().items():
         assert torch.equal(model.state_dict()[k], v)
     assert not model.training and all(not p.requires_grad for p in model.parameters())
-
-
-def test_private_alias_kept():
-    assert bb._hub_source is bb.dinov2_hub_source

@@ -10,4 +10,4 @@ Subpackages:
   inference    ``Predictor`` (Python API) and the ``predict`` command
   evaluation   segmentation metrics, ``evaluate`` and ``compare`` commands
 """
-__version__ = "0.1.0"
+__version__ = "0.2.0"

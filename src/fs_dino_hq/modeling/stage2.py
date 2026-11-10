@@ -41,7 +41,6 @@ from .model import (BottleneckAdapter, DINOv2LastLayerExtractor,
 
 DINO_PREFIXES = ("last_extractor.", "layer3_extractor.")
 TRAINABLE_TOP = ("adapter", "semantic_branch", "corr_branch", "sam_full.mask_decoder")
-FROZEN_TOP = ("last_extractor", "layer3_extractor", "sam_full.prompt_encoder")
 
 
 class SamDecoderHead(nn.Module):

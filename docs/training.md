@@ -105,7 +105,9 @@ fs-dino-hq train-stage2 --config configs/stage2_five_shot.json
   random-number state and histories for `--resume`), `config.json`,
   `freeze_audit.json`, `adapter_init_report.json`, `frozen_check.json`.
 * `--resume` continues from `stage2_last.pt`; a run directory that already
-  contains `stage2_last.pt` is refused without it.
+  contains `stage2_last.pt` is refused without it, and a resume with other
+  schedule options (episodes per epoch, batch size, shots, learning rate,
+  seed, validation settings) than the interrupted run is refused.
 * `--smoke` runs one epoch of 4 training episodes (unless `--epochs` is given)
   and checks preprocessing, gradient paths and (for K > 1) the K-shot
   aggregation; the full validation of each epoch still covers every validation
@@ -130,7 +132,8 @@ Outputs in the run directory: `stage2_selected.pt` (copy of the winner),
 `stage2_selected.json`, `stage2_selection_report.json` (all candidates and
 their scores, status `OK` or `FAILED`) and `stage2_selection_cache.json`.
 Scores are cached per candidate, so an interrupted selection resumes; a rerun
-only recomputes what is missing. The dataset root, the validation plans and the
+only recomputes what is missing. A cached score is reused only for the same
+weights, evaluation code, plan, data files and backbone files. The dataset root, the validation plans and the
 backbone checkpoints are read from the run's `config.json`; if they have moved,
 pass `--synthetic-root`, `--dino-ckpt`, `--sam-ckpt` and the plans
 (`--select-plan val5=<path>:5 --diagnostic-plans val1=<path>:1`). Run time: about
@@ -145,7 +148,8 @@ fs-dino-hq train-hq --config configs/hq_five_shot.json
 
 * Inputs: `--stage2-run` (uses `stage2_selected.pt` after checking the
   selection report and hashes), the early adapter from step 1b, the SAM ViT-H
-  and HQ-SAM ViT-H weights. Any other Stage 2 checkpoint needs
+  and HQ-SAM ViT-H weights (a file that lacks the HQ-SAM decoder tensors is
+  refused). Any other Stage 2 checkpoint needs
   `--stage2-ckpt FILE --allow-unselected-stage2` (on the command line it
   replaces the config's `stage2_run`) and is recorded as such in
   `stage2_input_provenance.json`.

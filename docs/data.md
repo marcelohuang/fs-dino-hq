@@ -37,7 +37,7 @@ background. The mask size is taken from the JSON, so it must match the image.
   `["img_003", "img_017", "img_021", "img_040", "img_052"]`. It selects and
   orders the supports; the same supports are used for every query. Without
   it all annotated images in `--support-dir` are used, sorted by name.
-  The released model was trained with five supports per episode.
+  The reported model was trained with five supports per episode.
 * `--query-dir`: query images; an annotation next to a query is optional and
   only used to report IoU/Dice.
 

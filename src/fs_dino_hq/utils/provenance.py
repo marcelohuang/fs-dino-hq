@@ -35,16 +35,6 @@ def hq_state_sha256(decoder) -> str:
     return h.hexdigest()
 
 
-def code_sha256(paths: Iterable[Path]) -> str:
-    """One SHA-256 over the concatenated bytes of the given source files (existing ones only)."""
-    h = hashlib.sha256()
-    for p in paths:
-        p = Path(p)
-        if p.exists():
-            h.update(p.read_bytes())
-    return h.hexdigest()
-
-
 def code_hashes_by_name(paths: Iterable[Path]) -> Dict[str, str]:
     """{relative-looking name: sha256} for a list of source files."""
     out: Dict[str, str] = {}

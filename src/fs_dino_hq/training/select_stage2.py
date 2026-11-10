@@ -229,6 +229,7 @@ def select_stage2_checkpoint(run_dir, select_plan: Optional[Tuple[str, str, int]
                             adapter_norm_first=bool(cfg["adapter_arch"]["norm_first"]),
                             adapter_dropout=float(cfg["adapter_arch"]["dropout"]),
                             corr_arch=cfg.get("corr_arch", "v2_reduced")).to(device)
+        del sam_full        # the model keeps the prompt encoder and the mask decoder
         apply_stage2_freeze(model)
         prep = LetterboxPreprocess(dino_size=int(cfg["dino_size"]))
         loaders = {}

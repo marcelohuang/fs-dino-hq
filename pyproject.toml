@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fs-dino-hq"
-version = "0.1.0"
+version = "0.2.0"
 description = "Few-shot segmentation from annotated support images with DINOv2 features, an FS-DINO style prompt generator, the SAM mask decoder and an HQ-SAM style refinement branch"
 readme = "README.md"
 requires-python = ">=3.10"

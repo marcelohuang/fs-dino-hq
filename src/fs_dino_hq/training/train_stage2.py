@@ -506,6 +506,7 @@ def train_stage2(args: argparse.Namespace) -> Dict:
     model = Stage2Model(dino_model, sam_full, feat_hw=args.feat_hw,
                         adapter_norm_first=args.adapter_norm_first,
                         adapter_dropout=args.adapter_dropout, corr_arch=CORR_ARCH).to(device)
+    del sam_full        # the model keeps the prompt encoder and the mask decoder
     adapter_init = init_adapter_from_distilled(model.adapter, args.adapter_ckpt)
     print(f"[INFO] adapter initialised from {args.adapter_ckpt} "
           f"(stage {adapter_init['provenance'].get('stage')} res {adapter_init['provenance'].get('res')} "
@@ -611,7 +612,7 @@ def train_stage2(args: argparse.Namespace) -> Dict:
             print(f"[SMOKE] {K}-shot checks ok={smoke['kshot']['ok']}: {smoke['kshot']['checks']}")
 
     def run_split(ds: PlanEpisodeDataset, offset: int, n: int, train: bool, epoch: int) -> Dict:
-        ds.offset, ds.limit, ds.epoch = offset, n, epoch
+        ds.offset, ds.limit = offset, n
         loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                             num_workers=args.num_workers, collate_fn=collate_plan_episodes,
                             worker_init_fn=functools.partial(worker_init, base_seed=args.seed + epoch),
@@ -678,8 +679,6 @@ def train_stage2(args: argparse.Namespace) -> Dict:
         stats = {k: tr[k] for k in ("loss", "loss_prior", "loss_final")}
         val = {"fast": fast, "full": full, "select_on": args.select_on, "full_all": full_all}
         write_hist()
-        save_stage2_checkpoint(last_path, model, epoch, stats, val, "last", config, optimizer,
-                               trackers, {"fast": fast_hist, "full": full_hist})
         if fast["loss"] < trackers["best_fast"]:
             trackers.update(best_fast=fast["loss"], best_fast_epoch=epoch)
             save_stage2_checkpoint(save_dir / f"{pfx}_best_fast_val.pt", model, epoch, stats, val, "best_fast_val", config)
@@ -690,7 +689,7 @@ def train_stage2(args: argparse.Namespace) -> Dict:
             print(f"[INFO] best FULL-val {full['loss']:.5f} @ epoch {epoch}")
         if epoch in set(args.save_epochs) or (args.save_every and epoch % args.save_every == 0):
             save_stage2_checkpoint(save_dir / f"{pfx}_epoch_{epoch:03d}.pt", model, epoch, stats, val, f"epoch_{epoch}", config)
-        # re-save last with the updated trackers (cheap: ~35 MB + optimizer)
+        # resume state, written once per epoch with the updated trackers
         save_stage2_checkpoint(last_path, model, epoch, stats, val, "last", config, optimizer,
                                trackers, {"fast": fast_hist, "full": full_hist})
 

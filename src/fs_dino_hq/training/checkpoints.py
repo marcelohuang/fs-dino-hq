@@ -112,12 +112,6 @@ def inspect_stage2_checkpoint(ckpt_path, out_json=None) -> Dict:
         info["total_tensors"] = len(sd)
         arch, grid = detect_corr_arch(sd)
         info["corr_arch"] = {"arch": arch, "grid": grid}
-        for sentinel in ("corr_branch.depthwise.weight",
-                         "corr_branch.pointwise.weight",
-                         "adapter.proj_out.weight",
-                         "sam_full.mask_decoder.iou_token.weight"):
-            if sentinel in sd:
-                info.setdefault("sentinel_shapes", {})[sentinel] = list(sd[sentinel].shape)
     if out_json:
         Path(out_json).parent.mkdir(parents=True, exist_ok=True)
         Path(out_json).write_text(json.dumps(info, indent=2))

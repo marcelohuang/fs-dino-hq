@@ -214,13 +214,24 @@ hash of the initial HQ state (`initial_hq_state_sha256`). GPU training is not bi
 reproducible (cuDNN determinism is requested, but not all kernels have
 deterministic implementations).
 
+Weight decay. Stage 2 and HQ training use AdamW with lr 1e-4 and weight decay
+1e-4. PyTorch applies the decoupled decay as a multiplication by
+`1 - lr * weight_decay` = 1 - 1e-8, which rounds to exactly 1 in single
+precision, so no decay takes place and both stages are in effect trained
+with Adam. (Stage 1, at lr 5e-4, decays only while its scheduled rate is
+above about 3e-4.)
+
 The random initialisation of new modules depends on the construction order
 of the model, which is kept fixed: DINOv2 (from the `torch.hub` code), the
 full SAM ViT-H model and then the project modules are built in the same order
 as for the runs in `docs/results.md`, even where a component is unused. The
 `torch.hub` DINOv2 code (pinned to the commit whose files are identical to the
 code used for those runs), the `segment_anything` version (pinned) and the
-PyTorch version also influence it.
+PyTorch version also influence it. With the inputs and seed of
+`configs/hq_five_shot.json`, `train-hq` starts from the HQ state whose hash
+(`initial_hq_state_sha256` in `config.json`) is
+`296f842ae3133931e16f0b4dd31f6014b3248c1bd5811765e59bbfcf70e8a11d`, the
+state the reported run and its control started from.
 
 ## References
 

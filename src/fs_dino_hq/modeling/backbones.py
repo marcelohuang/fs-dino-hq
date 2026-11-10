@@ -64,9 +64,6 @@ def dinov2_hub_source(hub_repo: Optional[str] = None) -> Tuple[str, str]:
     return repo, "github"
 
 
-_hub_source = dinov2_hub_source  # earlier private name
-
-
 def build_dinov2_vitb14(hub_repo: Optional[str] = None) -> nn.Module:
     """DINOv2 ViT-B/14 architecture with random initial weights, frozen and in eval mode.
 
