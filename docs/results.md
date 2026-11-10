@@ -43,9 +43,20 @@ real-photo numbers cannot be reproduced without access to the same images.
 * Training data. Stage 2 and HQ were trained on synthetic images only; all
   real-photo numbers are therefore transfer results.
 * Single runs. No seed replication; GPU training is not bitwise
-  reproducible.
+  reproducible. Differences between two configurations below are differences
+  between two single runs; whether they exceed the variation between training
+  seeds was not measured.
+* One support set. Every result uses the same five supports; the sensitivity
+  to the choice of supports was not measured.
+* Checkpoint choice. The HQ checkpoint is the one with the lowest validation
+  loss among ten validated epochs. That loss compares the logits with the
+  query mask resized to 256 x 256 by nearest-neighbour index, which places the
+  target about half a cell off the logit grid. Ranking the saved checkpoints
+  of the reported run by IoU at native resolution on the same validation
+  episodes prefers epoch 40 instead of 45; on the 46 queries epoch 40 reaches
+  an IoU of 0.4160, 0.0011 [0.0004, 0.0018] below epoch 45.
 
-## Released configuration (five-shot Stage 2, HQ)
+## Reported configuration (five-shot Stage 2, HQ branch with the point-sampled loss)
 
 Training-side selections, made on held-out validation data (never on the 46
 evaluation queries): 395 unlabelled construction-site photographs for Stage 1,
@@ -56,39 +67,66 @@ evaluation queries): 395 unlabelled construction-site photographs for Stage 1,
 | Stage 1, final adapter | stage 518 px, epoch 14 of 14 (30 overall) | held-out MSE 0.00323, cosine 0.820 to the SAM embedding (395 images, 518 px) |
 | Stage 1, early adapter | stage 518 px, epoch 14 of 14 (30 overall) | cosine 0.855 to the PCA-reduced SAM block-7 feature (395 images, 518 px) |
 | Stage 2, five-shot | epoch 183 of 200 (best of 22 distinct saved states) | five-shot validation loss 1.2001 (prior 0.9711 + decoder 0.2289), decoder IoU 0.792, 1,421 episodes |
-| HQ | epoch 40 of 50 | five-shot validation loss 0.2171, 1,421 episodes |
+| HQ (`configs/hq_five_shot.json`) | epoch 45 of 50 (45,000 optimizer updates) | lowest full-validation loss, 0.2794 (dice + BCE on the 256 x 256 grid, 1,421 episodes; validated every 5 epochs) |
 
 Real-photo evaluation (46 queries, 5 supports):
 
 | Output | IoU | Dice | Boundary F | Thin recall | Fragmentation (lower is better) |
 |---|---|---|---|---|---|
-| Corrected (model output) | 0.4086 (median 0.4294) | 0.5725 | 0.4630 | 0.5993 | 18.14 (median 15.0) |
+| Corrected (model output) | 0.4171 (median 0.4397) | 0.5812 | 0.4724 | 0.6245 | 22.46 (median 19.75) |
 | Stage 2 base (no HQ branch) | 0.4050 (median 0.4235) | 0.5687 | 0.4600 | 0.5870 | 21.13 (median 18.0) |
 
 Effect of the HQ branch (corrected minus Stage 2 base, same checkpoint, paired over the 46 queries):
 
-| Metric | Difference | 95 % interval |
-|---|---|---|
-| IoU | +0.0036 | [+0.0012, +0.0063] |
-| Dice | +0.0038 | [+0.0014, +0.0064] |
-| Boundary F | +0.0030 | [-0.0007, +0.0070] |
-| Thin recall | +0.0124 | [+0.0078, +0.0169] |
-| Fragmentation | -2.98 | [-5.05, -1.05] |
+| Metric | Difference | 95 % interval | Queries better / equal / worse |
+|---|---|---|---|
+| IoU | +0.0120 | [+0.0074, +0.0173] | 34 / 0 / 12 |
+| Dice | +0.0125 | [+0.0075, +0.0179] | 34 / 0 / 12 |
+| Boundary F | +0.0124 | [+0.0055, +0.0193] | 32 / 0 / 14 |
+| Thin recall | +0.0376 | [+0.0306, +0.0450] | 44 / 0 / 2 |
+| Fragmentation | +1.33 | [-0.46, +3.15] | 19 / 1 / 26 |
 
-The HQ branch changes the output by small amounts; most of the performance
-comes from the Stage 2 model.
+Most of the performance comes from the Stage 2 model; the HQ branch adds
+about 0.012 IoU, mainly by recovering thin structures.
+
+## Effect of the HQ training loss
+
+Control run: the same Stage 2 checkpoint, early adapter, initial HQ weights,
+episodes, seed and budget, trained with dice + BCE on the 256 x 256 logit grid
+(`--loss full_grid`) instead of the point-sampled loss. Its selected
+checkpoint is epoch 40 (full-validation loss 0.2171).
+
+| HQ training loss | IoU | Dice | Boundary F | Thin recall | Fragmentation |
+|---|---|---|---|---|---|
+| Point-sampled, 1024 x 1024 target (reported) | 0.4171 | 0.5812 | 0.4724 | 0.6245 | 22.46 |
+| Full grid, 256 x 256 target (control) | 0.4086 | 0.5725 | 0.4630 | 0.5993 | 18.14 |
+| Difference [95 % interval], better / equal / worse | +0.0084 [+0.0036, +0.0137], 31 / 0 / 15 | +0.0087 [+0.0037, +0.0141], 31 / 0 / 15 | +0.0094 [+0.0020, +0.0169], 25 / 0 / 21 | +0.0252 [+0.0183, +0.0323], 39 / 0 / 7 | +4.31 [+2.57, +6.03], 6 / 2 / 38 |
+
+The two losses differ in more than the sampling of points: the point-sampled
+loss reads a 1024 x 1024 target at the positions at which it reads the
+logits, whereas the full-grid loss uses a 256 x 256 target that is coarser
+and about half a cell off the logit grid (see
+[implementation_notes.md](implementation_notes.md#hq-branch)); the Dice
+smoothing constants also differ. The gain can therefore not be attributed to
+point sampling alone. The reported model recovers more of the annotated bars
+(higher recall on thin structures) and produces more small separate
+components (higher fragmentation). The validation losses of the two runs are
+on the same scale but not comparable as a ranking of the two losses: the
+control is trained on the validation target, the reported model on the
+1024 x 1024 one.
 
 ## Five-shot versus one-shot Stage 2 training
 
 Two Stage 2 runs differing only in the number of supports per training
 episode (`configs/stage2_five_shot.json`, `configs/stage2_one_shot.json`;
 same queries, budget and initialisation), each followed by its own HQ run
-with the released HQ configuration. To compare at matched selection
+with the full-grid HQ loss (`--loss full_grid`), the configuration in use
+when this comparison was made. To compare at matched selection
 opportunity, each run used the checkpoint with the lowest five-shot validation
 loss among the epochs saved by both runs (50, 100, 150, 200): epoch 200 for
 five-shot training (loss 1.2181) and epoch 100 for one-shot training
 (loss 1.2968). These are not the checkpoints of
-the released configuration (five-shot epoch 183 is selected among all its
+the reported configuration (five-shot epoch 183 is selected among all its
 saved states). Real-photo evaluation, five-shot minus one-shot, 46 queries:
 
 | Metric | Stage 2 base: one-shot / five-shot | Difference [95 % interval] | Corrected: one-shot / five-shot | Difference [95 % interval] |
@@ -110,7 +148,7 @@ To reproduce the comparison:
    100, 150 and 200 of each run.
 2. Train the HQ branch on each matched checkpoint, which is not a selection
    artifact:
-   `fs-dino-hq train-hq --config configs/hq_five_shot.json --stage2-ckpt $OUTPUT_DIR/stage2_one_shot/stage2_epoch_100.pt --allow-unselected-stage2 --save-dir $OUTPUT_DIR/hq_one_shot_e100`
+   `fs-dino-hq train-hq --config configs/hq_five_shot.json --loss full_grid --stage2-ckpt $OUTPUT_DIR/stage2_one_shot/stage2_epoch_100.pt --allow-unselected-stage2 --save-dir $OUTPUT_DIR/hq_one_shot_e100`
    (and likewise `stage2_five_shot/stage2_epoch_200.pt`).
 3. Predict and evaluate both as in `docs/evaluation.md` (with `--save-base`)
    and compare the per-image metric files with `fs-dino-hq compare`.

@@ -149,12 +149,49 @@ unless `--allow-unselected-stage2` is given (recorded in the run).
   scale fixed at 1). In HQ-SAM the HQ token shares the decoder pass with the
   SAM mask token; with the separate pass the Stage 2 output cannot change when
   the HQ modules are trained.
-* Loss: dice + BCE on the corrected logits over the full 256 x 256 grid,
-  AdamW (lr 1e-4, weight decay 1e-4), batch 2, five-shot episodes. HQ-SAM's
-  training code computes its mask losses on sampled points; that variant is
-  not part of this release.
-* Checkpoint selection: lowest loss on the full validation plan, evaluated
-  every 5 epochs.
+* Loss: BCE + Dice on the corrected logits at 12,544 sampled points per
+  mask, the mask loss of the HQ-SAM training code
+  (`training/point_loss.py`): three times as many candidate points are drawn
+  uniformly, the 75 % of the points with the predicted logit closest to zero
+  are kept and 25 % are drawn uniformly again. The target is the query mask
+  letterboxed to 1024 x 1024 (nearest neighbour from the annotation raster,
+  same top-left canvas as the input); logits and target are read at the same
+  normalised coordinates with bilinear interpolation. AdamW (lr 1e-4, weight
+  decay 1e-4, no schedule), batch 2, five-shot episodes, 50 epochs of 2,000
+  episodes (50,000 optimizer updates).
+* Alternative loss (`--loss full_grid`, the control in `docs/results.md`):
+  dice + BCE on every cell of the 256 x 256 logit grid against the query mask
+  resized from the 518 x 518 letterbox with `F.interpolate(mode="nearest")`.
+  That resize reads, for each of the 256 cells, the pixel at
+  `floor(index * 518 / 256)`, the cell's upper-left corner rather than its
+  centre, so this target is displaced by about half a cell relative to the
+  logit grid (1 pixel at 518, about 5 pixels in a 2400-pixel image), and
+  bars narrower than about 9 pixels in such an image can vanish from it.
+* Validation and checkpoint selection: the full-grid loss with that
+  256 x 256 target on the corrected logits, on the whole validation plan every
+  5 epochs, for either training loss; the checkpoint with the lowest value is
+  `hq_best.pt`. Every validated checkpoint is also kept as
+  `hq_epoch_<E>.pt`, so that the candidates can be ranked by another
+  criterion (see the note on checkpoint choice in `docs/results.md`).
+
+### Relation to the HQ-SAM training recipe
+
+| | HQ-SAM | This implementation |
+|---|---|---|
+| Supervised output | the mask of the HQ token alone | base + HQ residual, the base detached |
+| Output at inference | SAM-token mask + HQ-token mask from one decoder pass | base from a pass without the HQ token + HQ residual from a second pass |
+| Mask loss | BCE + Dice at 12,544 sampled points | the same loss and sampling settings |
+| Loss target | 1024 x 1024 ground truth after large-scale jitter (bilinear) | binary mask letterboxed to 1024 x 1024 (nearest neighbour), no augmentation |
+| Logit grid | 256 x 256 over SAM's padded 1024 x 1024 input | 256 x 256 over the padded 518 x 518 DINOv2 input |
+| Early / final features | SAM ViT block feature and SAM image embedding | distilled early adapter and Stage 2 adapter embedding (DINOv2) |
+| Prompts | box, points or a noised ground-truth mask | prompts generated from K annotated supports |
+| Optimisation | Adam, lr 1e-3 with a step decay, 12 epochs, batch 32 | AdamW, lr 1e-4 constant, 50,000 updates, batch 2 |
+
+Supervising the HQ token alone and summing it with the SAM token of the same
+pass, as in HQ-SAM, was also tried with both losses; on the evaluation set of
+`docs/results.md` it gave lower IoU and recall than the residual formulation
+(IoU 0.4064 with the full-grid loss and 0.4104 with the point-sampled loss,
+against 0.4086 and 0.4171), and is not part of this code.
 
 ## Preprocessing (all stages)
 

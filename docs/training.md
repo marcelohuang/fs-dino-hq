@@ -149,16 +149,24 @@ fs-dino-hq train-hq --config configs/hq_five_shot.json
   `--stage2-ckpt FILE --allow-unselected-stage2` (on the command line it
   replaces the config's `stage2_run`) and is recorded as such in
   `stage2_input_provenance.json`.
-* 50 epochs of 2,000 five-shot episodes; full validation every 5 epochs;
+* 50 epochs of 2,000 five-shot episodes at batch size 2: 1,000 optimizer
+  updates per epoch, 50,000 in total. Full validation every 5 epochs;
   `hq_best.pt` is the checkpoint with the lowest full-validation loss
   (`checkpoint_selection_report.json`).
-* Outputs: `loss_history_fast.csv`, `loss_history_full.csv`,
-  `hq_best_full_val.pt`, `hq_best_fast_val.pt`, `hq_last.pt`,
-  `hq_epoch_{25,40,50}.pt`, `hq_best.pt`, and the provenance files listed by
-  `fs-dino-hq train-hq --help`. `config.json` records the hashes of all input
-  files and the hash of the initial HQ state.
+* Training loss: BCE + Dice at sampled points against the 1024 x 1024 mask
+  (`"loss": "point_sampled"` in the config). `--loss full_grid` trains with
+  dice + BCE on the 256 x 256 grid instead, the control of `docs/results.md`.
+  Validation uses the full-grid loss in both cases, so the training and
+  validation curves of a point-sampled run are on different scales.
+* Outputs: `loss_history_fast.csv` (per epoch: cumulative optimizer updates,
+  training loss and its BCE and Dice terms, fast-validation loss),
+  `loss_history_full.csv`, `train_steps.csv` (one row per optimizer update),
+  `hq_epoch_<E>.pt` for every full-validation epoch, `hq_best_full_val.pt`,
+  `hq_best_fast_val.pt`, `hq_last.pt`, `hq_best.pt`, and the provenance files
+  listed by `fs-dino-hq train-hq --help`. `config.json` records the hashes of
+  all input files and the hash of the initial HQ state.
 * `--smoke` runs one training step and checks that only HQ parameters change.
-* Run time on one L40S: about 9 hours.
+* Run time on one L40S: about 11 hours.
 
 The HQ trainer has no `--resume`; a run directory that already contains
 `hq_best_full_val.pt` is refused.
@@ -171,7 +179,10 @@ fs-dino-hq plot-history $OUTPUT_DIR/stage2_five_shot   # also: distill and HQ ru
 ```
 
 Writes `<run>.png` (optionally `--format png pdf`) and a `<run>_series.csv`
-into the run directory (or `--out`), with the selected epoch marked.
+into the run directory (or `--out`), with the selected epoch marked. The
+horizontal axis is the epoch; for HQ runs its label gives the number of
+optimizer updates per epoch, and the training loss is drawn with its BCE and
+Dice terms in a panel of its own.
 
 ## Hardware and software
 

@@ -4,7 +4,8 @@ Few-shot segmentation from a handful of annotated support images. A frozen
 DINOv2 ViT-B/14 encodes the support and query images; an FS-DINO style meta
 visual prompt generator turns the annotated supports into prompts for the SAM
 mask decoder; an HQ-SAM style branch adds a residual correction to the
-decoder output. The SAM image encoder is used only as a teacher to distil the
+decoder output and is trained with the point-sampled mask loss of HQ-SAM. The
+SAM image encoder is used only as a teacher to distil the
 two adapters that map DINOv2 features into SAM's feature space. The code was
 developed for segmenting rebar in construction-site photographs with five
 annotated supports.
@@ -29,7 +30,7 @@ depend on.
 Python 3.10 or newer and PyTorch 2.1 or newer (a CUDA GPU for training).
 
 ```bash
-git clone <repository-url> fs-dino-hq
+git clone https://github.com/marcelohuang/fs-dino-hq.git
 cd fs-dino-hq
 pip install -e .            # add [plot] for loss curves, [dev] for the tests
 ```
@@ -125,11 +126,12 @@ paired bootstrap are defined in [docs/evaluation.md](docs/evaluation.md).
 ## Results
 
 On 46 annotated construction-site photographs with five fixed supports, the
-released configuration reached a mean IoU of 0.409 (0.405 without the HQ
-branch). These numbers come from single training runs evaluated on a private,
-reused evaluation set with partial annotations;
-[docs/results.md](docs/results.md) gives the full tables, the limitations and
-what was re-verified with this code.
+configuration in `configs/` reached a mean IoU of 0.417 (0.405 without the HQ
+branch; 0.409 when the HQ branch is trained with a full-grid loss instead of
+the point-sampled one). These numbers come from single training runs with one
+seed and one fixed support set, evaluated on a private, reused evaluation set
+with partial annotations; [docs/results.md](docs/results.md) gives the full
+tables, the limitations and what was re-verified with this code.
 
 ## Repository layout
 
@@ -150,9 +152,11 @@ tools/slurm/    optional job-script template
 ## License
 
 This repository does not yet carry a license.
-`src/fs_dino_hq/modeling/hq_decoder.py` contains code adapted from Segment
-Anything and HQ-SAM under the Apache License 2.0; see
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+`src/fs_dino_hq/modeling/hq_decoder.py` and
+`src/fs_dino_hq/training/point_loss.py` contain code adapted from Segment
+Anything and HQ-SAM under the Apache License 2.0;
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) gives the attributions, the
+modifications and the license text.
 
 ## Acknowledgements
 

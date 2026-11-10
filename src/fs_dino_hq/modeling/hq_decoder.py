@@ -5,10 +5,10 @@
 #   segment_anything/modeling/mask_decoder_hq.py (MaskDecoderHQ)
 #     https://github.com/SysCV/sam-hq
 #     Copyright (c) Meta Platforms, Inc. and affiliates. Modified by HQ-SAM team. All rights reserved.
-# Both are licensed under the Apache License, Version 2.0 (LICENSES/Apache-2.0.txt).
+# Both are licensed under the Apache License, Version 2.0 (full text in THIRD_PARTY_NOTICES.md).
 # Modifications in this file: DINOv2/adapter feature sources (dino_l3_proj, early_proj,
 # adapter_proj), the canonical Stage 2 base pass without the HQ token, and the dual-pass
-# residual (predict_dual_canonical). See THIRD_PARTY_NOTICES.md.
+# residual (predict_dual_canonical).
 """HQMaskDecoder: the SAM mask decoder with an HQ-SAM style high-quality branch
 adapted to DINOv2-based features.
 
