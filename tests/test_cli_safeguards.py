@@ -90,8 +90,32 @@ def test_evaluate_refuses_zero_one_masks(tmp_path):
     with pytest.raises(ValueError, match="0/255"):
         evaluate_dir(tmp_path / "pred", tmp_path)
     Image.fromarray(pred * 255).save(tmp_path / "pred" / "q.png")
-    rows, skipped = evaluate_dir(tmp_path / "pred", tmp_path)
-    assert len(rows) == 1 and rows[0]["iou"] > 0
+    rows, skipped, missing = evaluate_dir(tmp_path / "pred", tmp_path)
+    assert len(rows) == 1 and rows[0]["iou"] > 0 and not missing
+
+
+def test_evaluate_fails_when_an_annotated_image_has_no_prediction(tmp_path):
+    """A mean over fewer images than annotated must not be returned silently."""
+    from fs_dino_hq.evaluation import evaluate as evaluate_cmd
+    gt, pred = tmp_path / "gt", tmp_path / "pred"
+    gt.mkdir(), pred.mkdir()
+    for name in ("a", "b"):
+        (gt / f"{name}.json").write_text(json.dumps({"imageHeight": 8, "imageWidth": 8, "shapes": [
+            {"label": "x", "points": [[1, 1], [6, 1], [6, 6], [1, 6]]}]}))
+    (gt / "support_set.json").write_text(json.dumps(["a", "b"]))       # not an annotation: ignored
+    (gt / "empty.json").write_text(json.dumps({"imageHeight": 8, "imageWidth": 8, "shapes": []}))
+    m = np.zeros((8, 8), np.uint8); m[1:7, 1:7] = 255
+    Image.fromarray(m).save(pred / "a.png")
+    rows, skipped, missing = evaluate_dir(pred, gt)
+    assert [r["image"] for r in rows] == ["a"] and missing == ["b"]
+    argv = ["--pred-dir", str(pred), "--gt-dir", str(gt), "--out-json", str(tmp_path / "m.json"),
+            "--out-csv", str(tmp_path / "m.csv")]
+    with pytest.raises(SystemExit, match="have no prediction"):
+        evaluate_cmd.main(argv)
+    assert not (tmp_path / "m.json").exists()
+    assert evaluate_cmd.main(argv + ["--allow-missing"]) == 0
+    summary = json.loads((tmp_path / "m.json").read_text())
+    assert summary["n_evaluated"] == 1 and summary["missing_predictions"] == ["b"]
 
 
 def test_predict_output_dir_refused_unless_overwrite(tmp_path):

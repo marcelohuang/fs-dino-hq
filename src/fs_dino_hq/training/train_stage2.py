@@ -75,6 +75,9 @@ CONFIG_KEYS = ("synthetic_root", "train_plan", "val_plan", "split_manifest", "sp
                "adapter_dropout", "label_filter", "smoke_episodes", "feat_hw", "notes",
                "n_shot", "val_plans", "select_on", "save_every")
 REQUIRED = ("synthetic_root", "train_plan", "val_plans", "adapter_ckpt", "dino_ckpt", "sam_ckpt", "save_dir")
+# Options that define the schedule and the objective; --resume refuses a run in which one of them changed.
+RESUME_LOCKED_ARGS = ("episodes_per_epoch", "n_shot", "batch_size", "lr", "weight_decay", "seed",
+                      "val_episodes", "full_val_every", "best_selection", "select_on")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -298,7 +301,9 @@ def load_resume_state(model: Stage2Model, optimizer, path: Path) -> Dict:
 
 # Decoder tensors that receive no gradient under this recipe: single-mask
 # output uses hypernetwork 0 only, and no IoU loss is applied (as in the
-# original Stage 2 training script; AdamW weight decay still shrinks them slowly).
+# original Stage 2 training script). They also stay bit-identical under AdamW:
+# at lr 1e-4 and weight decay 1e-4 the decay factor 1 - lr * wd rounds to 1 in
+# float32 (see docs/implementation_notes.md).
 EXPECTED_NO_GRAD = {"sam_full.mask_decoder": ("output_hypernetworks_mlps.1.", "output_hypernetworks_mlps.2.",
                                               "output_hypernetworks_mlps.3.", "iou_prediction_head.")}
 
@@ -581,6 +586,10 @@ def train_stage2(args: argparse.Namespace) -> Dict:
         prev = ck["config"]
         for k in ("adapter_ckpt", "train_plan"):
             assert prev["input_sha256"][k] == config["input_sha256"][k], f"resume: {k} changed"
+        changed = [(k, prev[k], config.get(k)) for k in RESUME_LOCKED_ARGS if k in prev and prev[k] != config.get(k)]
+        if changed:
+            raise SystemExit("REFUSING to resume: these options differ from the interrupted run "
+                             "(option, then, now): " + ", ".join(map(str, changed)))
         trackers = ck["trackers"]; fast_hist = ck["histories"]["fast"]; full_hist = ck["histories"]["full"]
         start_epoch = int(ck["epoch"]) + 1
         config["resumed_from"] = list(prev.get("resumed_from", [])) + [

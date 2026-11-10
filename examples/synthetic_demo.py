@@ -102,7 +102,7 @@ def main() -> None:
         Image.fromarray(res.mask * 255).save(out / "pred_mask" / f"{q.name}.png")
         print(f"{q.name}: probability range [{res.probability.min():.3f}, {res.probability.max():.3f}], "
               f"foreground {res.mask.mean():.3f}")
-    rows, skipped = evaluate_dir(out / "pred_mask", q_dir)
+    rows, skipped, _ = evaluate_dir(out / "pred_mask", q_dir)
     agg = summarise(rows)
     print(f"mean IoU {agg['iou']['mean']:.3f} over {len(rows)} queries ({len(skipped)} skipped)")
 

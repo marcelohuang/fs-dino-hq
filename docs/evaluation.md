@@ -52,8 +52,11 @@ available as `Prediction.logits["hq_logits"]` for analysis.
 another size are resized with nearest neighbour). Predictions are read as 8-bit
 grayscale and a pixel value above 127 is foreground: use 0/255 masks such as
 `pred_mask/` from `predict` (a 0/1 mask is refused with an error).
-Images without an annotation file, or with an empty annotation, are skipped
-and listed in the summary.
+Predictions without an annotation file, or with an empty annotation, are
+skipped and listed in the summary. An annotation in `--gt-dir` that has no
+prediction stops the command, so that a partial set of predictions cannot
+produce a mean over fewer images; `--allow-missing` evaluates the available
+ones and lists the missing images in the summary.
 
 | Metric | Definition |
 |---|---|

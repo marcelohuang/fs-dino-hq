@@ -321,6 +321,10 @@ def test_resume_continues_the_same_trajectory(tmp_path, tiny_setup):
     sa = torch.load(tmp_path / "a" / "stage2_last.pt", map_location="cpu", weights_only=False)["stage2_model"]
     sb = torch.load(tmp_path / "b" / "stage2_last.pt", map_location="cpu", weights_only=False)["stage2_model"]
     assert sa.keys() == sb.keys() and all(torch.equal(sa[k], sb[k]) for k in sa)   # CPU: bitwise
+    # a resume with another schedule would silently train a different run: refused
+    other = [("4" if a == "2" and base[i - 1] == "--episodes-per-epoch" else a) for i, a in enumerate(base)]
+    with pytest.raises(SystemExit, match="REFUSING to resume"):
+        trainer.main(other + ["--save-dir", str(tmp_path / "b"), "--epochs", "3", "--resume"])
 
 
 def test_trainer_five_shot_with_two_validation_plans(tmp_path, tiny_setup):

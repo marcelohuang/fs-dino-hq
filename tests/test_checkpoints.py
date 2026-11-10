@@ -148,6 +148,19 @@ def test_inspect_reports_convention_and_architecture(stage2_ckpt, tmp_path):
     assert json.loads((tmp_path / "inspect.json").read_text())["epoch"] == 7
 
 
+def test_strict_load_checks_the_recorded_dinov2_hash(stage2_model, tmp_path):
+    """Stage 2 checkpoints hold no DINOv2 tensors; the weights file is identified by its recorded hash."""
+    ck = save_stage2_checkpoint(tmp_path / "s2.pt", stage2_model,
+                                config={"ckpt_prefix": "stage2", "input_sha256": {"dino_ckpt": "a" * 64}})
+    rep = load_stage2_strict(make_hq_model(), ck, tmp_path / "ok.json", dino_ckpt_sha256="a" * 64)
+    assert rep["status"] == "OK" and rep["consistency_checks"]["dino_ckpt_sha256_equal"] is True
+    with pytest.raises(RuntimeError, match="DINOv2 weights differ"):
+        load_stage2_strict(make_hq_model(), ck, tmp_path / "bad.json", dino_ckpt_sha256="b" * 64)
+    assert json.loads((tmp_path / "bad.json").read_text())["consistency_checks"]["dino_ckpt_sha256_equal"] is False
+    rep = load_stage2_strict(make_hq_model(), ck, tmp_path / "none.json")      # hash not given: not checked
+    assert rep["consistency_checks"]["dino_ckpt_sha256_equal"] is None
+
+
 def test_strict_load_copies_every_stage2_weight(stage2_model, stage2_ckpt, tmp_path):
     hq = make_hq_model()
     hq_before = {k: v.clone() for k, v in hq.hq_mask_decoder.hq_state_dict().items()}
@@ -287,29 +300,25 @@ def test_sam_hq_partial_load_mapping(tmp_path):
         else:                                # base decoder, dino_l3_proj, early_proj
             assert torch.equal(v, before[k]), k
     assert loaded == rep["loaded_count"] == 19
-    assert rep["rand_init_count"] == 12
-    assert sorted(rep["rand_init_by_module"]) == ["dino_l3_proj", "early_proj"]
-    assert len(rep["dino_l3_proj_rand_init"]) == 6
-    cats = rep["categories"]
-    assert cats["global_local_vit"]["skipped_count"] == 6 and cats["global_local_vit"]["loaded_count"] == 0
-    assert cats["sam_decoder_base"]["skipped_count"] == 2
-    assert cats["image_encoder"]["skipped_count"] == 1 and cats["prompt_encoder"]["skipped_count"] == 1
-    assert rep["total_ckpt_keys"] == len(sd) and rep["shape_mismatch_count"] == 0
+    assert sorted({k.split(".")[0] for k in rep["random_init_keys"]}) == ["dino_l3_proj", "early_proj"]
+    assert len(rep["random_init_keys"]) == 12
     assert json.loads((tmp_path / "out" / "sam_hq_loading_report.json").read_text())["loaded_count"] == 19
 
 
-def test_sam_hq_partial_load_skips_shape_mismatch(tmp_path):
+def test_sam_hq_partial_load_refuses_a_file_that_would_leave_hq_modules_random(tmp_path):
     dec = new_hq_decoder()
     sd = fake_sam_hq_state(dec)
-    sd["mask_decoder.hf_token.weight"] = torch.zeros(1, 128)
-    sd["unrelated.weight"] = torch.zeros(2)
-    ck = tmp_path / "sam_hq.pth"
-    torch.save(sd, ck)
-    token_before = dec.hf_token.weight.detach().clone()
-    rep = load_sam_hq_partial(SimpleNamespace(hq_mask_decoder=dec), ck)
-    assert torch.equal(dec.hf_token.weight, token_before)
-    assert rep["shape_mismatch_count"] == 1 and rep["loaded_count"] == 18
-    assert rep["other_unrecognised_keys"] == ["unrelated.weight"]
+    before = {k: v.clone() for k, v in dec.state_dict().items()}
+    wrong_shape = dict(sd)
+    wrong_shape["mask_decoder.hf_token.weight"] = torch.zeros(1, 128)
+    torch.save(wrong_shape, tmp_path / "shape.pth")
+    with pytest.raises(ValueError, match="hf_token.weight has shape"):
+        load_sam_hq_partial(SimpleNamespace(hq_mask_decoder=dec), tmp_path / "shape.pth")
+    plain_sam = {k: v for k, v in sd.items() if "hf_" not in k and "embedding_" not in k}
+    torch.save(plain_sam, tmp_path / "sam.pth")                 # e.g. a SAM file passed by mistake
+    with pytest.raises(ValueError, match="not a usable SAM-HQ"):
+        load_sam_hq_partial(SimpleNamespace(hq_mask_decoder=dec), tmp_path / "sam.pth")
+    assert all(torch.equal(v, before[k]) for k, v in dec.state_dict().items())    # nothing was loaded
 
 
 # ── early adapter ────────────────────────────────────────────────────────────

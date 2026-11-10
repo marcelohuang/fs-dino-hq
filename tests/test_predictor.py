@@ -457,14 +457,14 @@ def test_evaluate_strip_suffix_and_duplicates(tmp_path):
     m = np.zeros((30, 40), np.uint8)
     m[5:21, 5:21] = 255
     Image.fromarray(m).save(pred_dir / "x_corrected_bin.png")
-    rows, skipped = evaluate_cmd.evaluate_dir(pred_dir, gt_dir, strip_suffix="_corrected_bin")
+    rows, skipped, _ = evaluate_cmd.evaluate_dir(pred_dir, gt_dir, strip_suffix="_corrected_bin")
     assert [r["image"] for r in rows] == ["x"] and rows[0]["iou"] == 1.0 and not skipped
-    rows, skipped = evaluate_cmd.evaluate_dir(pred_dir, gt_dir)
-    assert not rows and skipped == ["x_corrected_bin.png: no annotation"]
+    rows, skipped, missing = evaluate_cmd.evaluate_dir(pred_dir, gt_dir)
+    assert not rows and skipped == ["x_corrected_bin.png: no annotation"] and missing == ["x"]
     Image.fromarray(m).save(pred_dir / "x.png")
     with pytest.raises(SystemExit, match="both map to image"):
         evaluate_cmd.main(["--pred-dir", str(pred_dir), "--gt-dir", str(gt_dir),
                            "--strip-suffix", "_corrected_bin"])
     _labelme(gt_dir / "x.json", 40, 30, [(5, 5, 20, 20)], label="intersection")
-    rows, skipped = evaluate_cmd.evaluate_dir(pred_dir, gt_dir, label_filter=["spacing"])
+    rows, skipped, _ = evaluate_cmd.evaluate_dir(pred_dir, gt_dir, label_filter=["spacing"])
     assert not rows and skipped == ["x.png: empty ground truth", "x_corrected_bin.png: no annotation"]

@@ -44,6 +44,7 @@ the report. Selection and diagnostic plans can be overridden with
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import shutil
@@ -57,7 +58,7 @@ import torch
 from fs_dino_hq.config import parse_with_config
 from fs_dino_hq.utils.provenance import file_sha256
 
-EVAL_IMPL_VERSION = "stage2_eval_v2"     # bump when evaluate_checkpoint / stage2_loss / letterbox semantics change
+EVAL_IMPL_VERSION = "stage2_eval_v3"     # bump when evaluate_checkpoint / stage2_loss / letterbox semantics change
 LOSS_DEFINITION = "dice(eps=1e-6)+BCE on prior logits (37x37 nearest mask) + dice+BCE on decoder logits (256x256 nearest mask)"
 PREPROCESS = "letterbox_longest_side_topleft_pad_bilinear_nearest"
 
@@ -87,9 +88,36 @@ def code_sha256() -> str:
     return h.hexdigest()
 
 
-def settings_signature(plan_path, n_shot: int, cfg: Dict, batch_size: int, code_hash: str) -> Dict:
+def _stat_id(path) -> List:
+    """[resolved path, size, modification time]: identifies a file without reading it."""
+    p = Path(path).resolve()
+    if not p.is_file():
+        return [str(p), None, None]
+    st = p.stat()
+    return [str(p), st.st_size, st.st_mtime_ns]
+
+
+def plan_data_fingerprint(plan_path, root) -> str:
+    """Hash over (relative path, size, modification time) of every image and
+    annotation the plan refers to, so that scores are not reused for other data
+    under the same plan file."""
+    with open(plan_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    rel = sorted({v for r in rows for k, v in r.items() if k.endswith(("_image", "_json")) and v})
+    h = hashlib.sha256()
+    for name in rel:
+        st = (Path(root) / name).stat()
+        h.update(f"{name}\0{st.st_size}\0{st.st_mtime_ns}\n".encode())
+    return h.hexdigest()
+
+
+def settings_signature(plan_path, n_shot: int, cfg: Dict, batch_size: int, code_hash: str,
+                       inputs: Dict) -> Dict:
+    """Everything a cached score depends on besides the model weights."""
     return {"eval_impl": EVAL_IMPL_VERSION, "code_sha256": code_hash,
             "val_plan_sha256": file_sha256(plan_path), "n_shot": int(n_shot),
+            "data": plan_data_fingerprint(plan_path, inputs["synthetic_root"]),
+            "dino_ckpt": _stat_id(inputs["dino_ckpt"]), "sam_ckpt": _stat_id(inputs["sam_ckpt"]),
             "dino_size": int(cfg["dino_size"]), "feat_hw": int(cfg.get("feat_hw", 37)),
             "preprocess": PREPROCESS, "loss": LOSS_DEFINITION, "batch_size": int(batch_size),
             "label_filter": cfg.get("label_filter"),
@@ -170,7 +198,7 @@ def select_stage2_checkpoint(run_dir, select_plan: Optional[Tuple[str, str, int]
         diagnostic_plans = [x for x in specs if x[0] != select_plan[0]]
     plans = [select_plan] + list(diagnostic_plans)
     code_hash = code_sha256()
-    sigs = {lab: settings_signature(path, k, cfg, batch_size, code_hash) for lab, path, k in plans}
+    sigs = {lab: settings_signature(path, k, cfg, batch_size, code_hash, inputs) for lab, path, k in plans}
     keys = {lab: signature_key(sigs[lab]) for lab in sigs}
 
     # candidates + dedup

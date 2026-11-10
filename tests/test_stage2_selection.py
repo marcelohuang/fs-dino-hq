@@ -113,6 +113,23 @@ def test_dedup_reuse_invalidation_and_skipped_epoch_can_win(tiny_run, tmp_path, 
         sel.select_stage2_checkpoint(run, scorer=_fake_scorer(LOSSES, calls=calls4),
                                      load_backbones=lambda d, s: backbones, num_workers=0)
     assert sorted(calls4) == [1, 2, 3]
+    # so do other data under the same plan file, and another backbone file
+    root = Path(json.loads((run / "config.json").read_text())["synthetic_root"])
+    other = shutil.copytree(root, tmp_path / "other_root")           # copies keep size and time: scores reused
+    calls5 = []
+    sel.select_stage2_checkpoint(run, scorer=_fake_scorer(LOSSES, calls=calls5), load_backbones=lambda d, s: backbones,
+                                 num_workers=0, synthetic_root=str(other))
+    assert calls5 == []
+    changed = next(Path(other).rglob("*.json"))
+    changed.write_text(changed.read_text() + " ")
+    sel.select_stage2_checkpoint(run, scorer=_fake_scorer(LOSSES, calls=calls5), load_backbones=lambda d, s: backbones,
+                                 num_workers=0, synthetic_root=str(other))
+    assert sorted(calls5) == [1, 2, 3]
+    (tmp_path / "other_dino.pth").write_bytes(b"other weights")
+    calls6 = []
+    sel.select_stage2_checkpoint(run, scorer=_fake_scorer(LOSSES, calls=calls6), load_backbones=lambda d, s: backbones,
+                                 num_workers=0, dino_ckpt=str(tmp_path / "other_dino.pth"))
+    assert sorted(calls6) == [1, 2, 3]
     # a changed winner rewrites the artifact and the sidecar
     rep5 = sel.select_stage2_checkpoint(run, scorer=_fake_scorer({1: (0.9, 0.3), 2: (0.95, 0.3), 3: (0.4, 0.2)}),
                                         load_backbones=lambda d, s: backbones, num_workers=0, batch_size=2)

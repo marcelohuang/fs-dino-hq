@@ -125,7 +125,7 @@ def inspect_stage2_checkpoint(ckpt_path, out_json=None) -> Dict:
 
 
 def load_stage2_strict(model: nn.Module, ckpt_path, report_path,
-                       dino_model: Optional[nn.Module] = None) -> Dict:
+                       dino_ckpt_sha256: Optional[str] = None) -> Dict:
     """Load a Stage 2 checkpoint into ``FSDinoHQModel`` under a strict contract.
 
     loaded    ``adapter.*``, ``semantic_branch.*``, ``pcs_branch.*``,
@@ -134,7 +134,8 @@ def load_stage2_strict(model: nn.Module, ckpt_path, report_path,
               (every key must land, shapes exact)
     ignored   ``IGNORED_PREFIXES`` (modules loaded from their own checkpoints)
     verified  the ignored SAM prompt encoder must equal ``model.prompt_encoder``;
-              DINOv2 sentinel tensors, if present, must equal ``dino_model``
+              the DINOv2 weights file must be the one Stage 2 was trained with
+              (``dino_ckpt_sha256`` against the hash recorded in the checkpoint)
     also      the adapter convention (``adapter_norm_first``) and the
               correlation architecture must match the model
 
@@ -254,17 +255,16 @@ def load_stage2_strict(model: nn.Module, ckpt_path, report_path,
     if pe_diff:
         errors.append(f"prompt_encoder drifted in stage-2 ckpt: {pe_diff[:3]}")
 
-    if dino_model is not None:
-        d_own = dino_model.state_dict()
-        drift = []
-        for sent in ("cls_token", "patch_embed.proj.weight", "blocks.0.norm1.weight"):
-            ck = full_sd.get("last_extractor.model." + sent)
-            if ck is not None and sent in d_own and not torch.allclose(
-                    ck.float(), d_own[sent].cpu().float(), atol=1e-6):
-                drift.append(sent)
-        report["consistency_checks"]["dino_sentinels_equal"] = (len(drift) == 0)
-        if drift:
-            errors.append(f"DINO weights drifted in stage-2 ckpt: {drift}")
+    # Stage 2 checkpoints do not store DINOv2; they record the hash of the
+    # weights file they were trained with.
+    recorded = (ckpt.get("config") or {}).get("input_sha256", {}).get("dino_ckpt")
+    if dino_ckpt_sha256 is not None and recorded is not None:
+        report["consistency_checks"]["dino_ckpt_sha256_equal"] = (recorded == dino_ckpt_sha256)
+        if recorded != dino_ckpt_sha256:
+            errors.append(f"DINOv2 weights differ from those of the Stage 2 run "
+                          f"(sha256 {dino_ckpt_sha256[:16]}... vs recorded {recorded[:16]}...)")
+    else:
+        report["consistency_checks"]["dino_ckpt_sha256_equal"] = None      # not recorded or not given
 
     report["status"] = "OK" if not errors else "FAILED"
     report["errors"] = errors
@@ -387,134 +387,58 @@ def verify_selected_stage2(path, prefix: Optional[str] = None) -> Dict:
 # SAM-HQ partial load
 # ─────────────────────────────────────────────────────────────────────────────
 
-# SAM-HQ key prefix -> (category, prefix in HQMaskDecoder or None = not loaded).
-# Matched in order; the "mask_decoder." catch-all must come after the HQ prefixes.
-SAM_HQ_CATEGORIES = {
-    "hq_token":          ("mask_decoder.hf_token.", "hf_token."),
-    "hq_mlp":            ("mask_decoder.hf_mlp.", "hf_mlp."),
-    "global_local_enc":  ("mask_decoder.embedding_encoder.", "adapter_proj."),
-    "global_local_mask": ("mask_decoder.embedding_maskfeature.", "decoder_mask_proj."),
-    "global_local_vit":  ("mask_decoder.compress_vit_feat.", None),   # 1280 vs 768 channels
-    "sam_decoder_base":  ("mask_decoder.", None),                     # Stage 2 weights kept
-    "image_encoder":     ("image_encoder.", None),
-    "prompt_encoder":    ("prompt_encoder.", None),
-}
-SAM_HQ_LABELS = {
-    "hq_token":          "1. HQ output token (hf_token)",
-    "hq_mlp":            "2. HQ MLP / hypernetwork (hf_mlp)",
-    "global_local_enc":  "3a. embedding_encoder -> adapter_proj",
-    "global_local_mask": "3b. embedding_maskfeature -> decoder_mask_proj",
-    "global_local_vit":  "3c. compress_vit_feat [skipped: 1280 vs 768 input channels]",
-    "sam_decoder_base":  "4. SAM mask decoder base weights [ignored: kept from Stage 2]",
-    "image_encoder":     "5. image encoder [ignored]",
-    "prompt_encoder":    "6. prompt encoder [ignored]",
-}
+# SAM-HQ mask-decoder module -> HQMaskDecoder module of the same architecture.
+SAM_HQ_MODULES = {"hf_token": "hf_token", "hf_mlp": "hf_mlp",
+                  "embedding_encoder": "adapter_proj", "embedding_maskfeature": "decoder_mask_proj"}
 
 
 def load_sam_hq_partial(model: nn.Module, ckpt_path, save_dir=None) -> Dict:
-    """Initialise HQ modules of ``model.hq_mask_decoder`` from SAM-HQ ViT-H weights.
-
-    Key mapping (SAM-HQ ``sam_hq_vit_h.pth`` -> ``HQMaskDecoder``):
+    """Initialise four HQ modules of ``model.hq_mask_decoder`` from SAM-HQ ViT-H weights.
 
         mask_decoder.hf_token.*               -> hf_token.*
         mask_decoder.hf_mlp.*                 -> hf_mlp.*
-        mask_decoder.embedding_encoder.*      -> adapter_proj.*       (same architecture)
-        mask_decoder.embedding_maskfeature.*  -> decoder_mask_proj.*  (same architecture)
-        mask_decoder.compress_vit_feat.*      -> skipped (expects 1280-channel ViT-H features)
-        other mask_decoder.*, image_encoder.*, prompt_encoder.*  -> ignored
+        mask_decoder.embedding_encoder.*      -> adapter_proj.*
+        mask_decoder.embedding_maskfeature.*  -> decoder_mask_proj.*
 
-    ``dino_l3_proj`` and ``early_proj`` have no SAM-HQ counterpart and keep their
-    random initialisation. Mapped keys with a different shape are skipped and
-    reported. Writes ``<save_dir>/sam_hq_loading_report.json`` when ``save_dir``
-    is given and returns the same report.
+    Every tensor of these four modules must be in the file with the model's
+    shape; otherwise a ``ValueError`` is raised, because a wrong file would
+    leave the HQ branch at its random initialisation. ``early_proj`` and
+    ``dino_l3_proj`` have no SAM-HQ counterpart (``compress_vit_feat`` expects
+    1280-channel SAM features) and keep their random initialisation; all other
+    tensors of the file are ignored. Writes
+    ``<save_dir>/sam_hq_loading_report.json`` when ``save_dir`` is given and
+    returns the same report.
     """
     ckpt_path = Path(ckpt_path)
-    raw_sd: Dict[str, torch.Tensor] = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-    total_ckpt_keys = len(raw_sd)
-
-    hq_decoder = model.hq_mask_decoder
-    own_sd = hq_decoder.state_dict()
-    cat_stats: Dict[str, Dict] = {cat: {"ckpt_keys": [], "loaded_keys": [], "skipped_keys": [],
-                                        "shape_mismatch": []} for cat in SAM_HQ_CATEGORIES}
-
+    raw: Dict[str, torch.Tensor] = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    decoder = model.hq_mask_decoder
+    own = decoder.state_dict()
     to_load: Dict[str, torch.Tensor] = {}
-    other_keys: List[str] = []
-    for raw_key, val in raw_sd.items():
-        matched = next((c for c, (src, _) in SAM_HQ_CATEGORIES.items() if raw_key.startswith(src)),
-                       None)
-        if matched is None:
-            other_keys.append(raw_key)
-            continue
-        stats = cat_stats[matched]
-        stats["ckpt_keys"].append(raw_key)
-        src_prefix, dst_prefix = SAM_HQ_CATEGORIES[matched]
-        if dst_prefix is None:
-            stats["skipped_keys"].append(raw_key)
-            continue
-        dst_key = dst_prefix + raw_key[len(src_prefix):]
-        if dst_key not in own_sd:
-            stats["skipped_keys"].append(f"{raw_key} → {dst_key}  [not in model]")
-        elif own_sd[dst_key].shape != val.shape:
-            stats["shape_mismatch"].append(
-                f"{raw_key} → {dst_key}  ckpt={tuple(val.shape)} model={tuple(own_sd[dst_key].shape)}")
-            stats["skipped_keys"].append(raw_key)
-        else:
-            to_load[dst_key] = val
-            stats["loaded_keys"].append(f"{raw_key} → {dst_key}  shape={tuple(val.shape)}")
-
-    hq_decoder.load_state_dict(to_load, strict=False)
-
-    # HQ keys that did not receive a SAM-HQ tensor keep their random init.
-    hq_keys: Dict[str, str] = {}
-    for attr in sorted(hq_decoder.HQ_MODULE_NAMES):
-        mod = getattr(hq_decoder, attr, None)
-        if mod is not None:
-            for pname in mod.state_dict():
-                hq_keys[f"{attr}.{pname}"] = attr
-    rand_init: Dict[str, List[str]] = {}
-    for dst_key, attr in hq_keys.items():
-        if dst_key not in to_load:
-            rand_init.setdefault(attr, []).append(dst_key)
-
-    n_loaded = sum(len(c["loaded_keys"]) for c in cat_stats.values())
-    n_skipped = sum(len(c["skipped_keys"]) for c in cat_stats.values())
-    n_mismatch = sum(len(c["shape_mismatch"]) for c in cat_stats.values())
-    total_hq_ckpt = sum(len(c["ckpt_keys"]) for cat, c in cat_stats.items()
-                        if cat not in ("sam_decoder_base", "image_encoder", "prompt_encoder"))
-    loaded_ratio = (f"{n_loaded}/{len(hq_keys)} "
-                    f"({100 * n_loaded / max(len(hq_keys), 1):.1f}% of HQ model params)")
-    report = {
-        "checkpoint_path": str(ckpt_path),
-        "total_ckpt_keys": total_ckpt_keys,
-        "total_hq_ckpt_keys": total_hq_ckpt,
-        "loaded_count": n_loaded,
-        "skipped_count": n_skipped,
-        "shape_mismatch_count": n_mismatch,
-        "rand_init_count": len(hq_keys) - n_loaded,
-        "loaded_ratio": loaded_ratio,
-        "categories": {
-            cat: {"label": SAM_HQ_LABELS[cat],
-                  "ckpt_key_count": len(s["ckpt_keys"]),
-                  "loaded_count": len(s["loaded_keys"]),
-                  "skipped_count": len(s["skipped_keys"]),
-                  "shape_mismatch_count": len(s["shape_mismatch"]),
-                  "loaded_keys": s["loaded_keys"],
-                  "skipped_keys": s["skipped_keys"],
-                  "shape_mismatch": s["shape_mismatch"]}
-            for cat, s in cat_stats.items()},
-        "dino_l3_proj_rand_init": rand_init.get("dino_l3_proj", []),
-        "rand_init_by_module": rand_init,
-        "other_unrecognised_keys": other_keys,
-    }
-    print(f"[sam_hq] {ckpt_path.name}: {total_ckpt_keys} keys, loaded {n_loaded} into HQ modules "
-          f"({loaded_ratio}); random init: {sorted(rand_init)}; shape mismatches: {n_mismatch}")
-    for s in (e for c in cat_stats.values() for e in c["shape_mismatch"]):
-        print(f"[sam_hq]   shape mismatch: {s}")
+    problems: List[str] = []
+    for src, dst in SAM_HQ_MODULES.items():
+        for key in (k for k in own if k.startswith(dst + ".")):
+            src_key = f"mask_decoder.{src}.{key[len(dst) + 1:]}"
+            if src_key not in raw:
+                problems.append(f"{src_key} is missing")
+            elif raw[src_key].shape != own[key].shape:
+                problems.append(f"{src_key} has shape {tuple(raw[src_key].shape)}, "
+                                f"expected {tuple(own[key].shape)}")
+            else:
+                to_load[key] = raw[src_key]
+    if problems:
+        raise ValueError(f"{ckpt_path} is not a usable SAM-HQ ViT-H checkpoint: " + "; ".join(problems[:4])
+                         + (f" (and {len(problems) - 4} more)" if len(problems) > 4 else ""))
+    decoder.load_state_dict(to_load, strict=False)
+    random_init = sorted(k for k in decoder.hq_state_dict() if k not in to_load)
+    report = {"checkpoint_path": str(ckpt_path), "loaded_count": len(to_load),
+              "loaded_keys": sorted(to_load), "random_init_keys": random_init}
+    print(f"[sam_hq] {ckpt_path.name}: {len(to_load)} tensors loaded into "
+          f"{sorted(SAM_HQ_MODULES.values())}; random initialisation kept for "
+          f"{sorted({k.split('.')[0] for k in random_init})}")
     if save_dir is not None:
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
-        with open(save_dir / "sam_hq_loading_report.json", "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
+        (save_dir / "sam_hq_loading_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
 
 

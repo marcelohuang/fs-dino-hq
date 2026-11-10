@@ -282,8 +282,9 @@ def train_hq(args: argparse.Namespace) -> int:
     del sam_full        # the model keeps the prompt encoder and the decoder transformer
 
     # ── Weights: Stage 2 (strict), SAM-HQ (HQ modules), early adapter ────
+    dino_sha = file_sha256(Path(args.dino_ckpt))
     load_stage2_strict(model, stage2_path, report_path=save_dir / "stage2_loading_report.json",
-                       dino_model=dino_model)
+                       dino_ckpt_sha256=dino_sha)
     load_sam_hq_partial(model, args.sam_hq_ckpt, save_dir=save_dir)
     ea, ea_meta = load_early_adapter(args.early_adapter_ckpt, device)
     model.early_adapter = ea
@@ -323,10 +324,11 @@ def train_hq(args: argparse.Namespace) -> int:
     (save_dir / "freeze_audit.json").write_text(json.dumps(audit, indent=2))
 
     # ── Config and provenance ────────────────────────────────────────────
+    @functools.lru_cache(maxsize=None)       # each input file is hashed once
     def sha_if_file(pth):
         return file_sha256(Path(pth)) if pth and Path(pth).is_file() else None
 
-    manifest_sha = {Path(pth).name: file_sha256(Path(pth))
+    manifest_sha = {Path(pth).name: sha_if_file(pth)
                     for pth in (args.train_plan, args.val_plan, args.split_manifest, args.split_audit)
                     if pth and Path(pth).is_file()}
     initial_hq_sha = hq_state_sha256(model.hq_mask_decoder)
@@ -338,7 +340,7 @@ def train_hq(args: argparse.Namespace) -> int:
         "split_audit_sha256": sha_if_file(args.split_audit),
         "stage2_ckpt_sha256": stage2_input["file_sha256"],
         "adapter_norm_first": adapter_arch["norm_first"],
-        "dino_ckpt_sha256": file_sha256(Path(args.dino_ckpt)),
+        "dino_ckpt_sha256": dino_sha,
         "sam_ckpt_sha256": file_sha256(Path(args.sam_ckpt)),
         "sam_hq_ckpt_sha256": file_sha256(Path(args.sam_hq_ckpt)),
         "early_adapter_ckpt_sha256": sha_if_file(args.early_adapter_ckpt),
