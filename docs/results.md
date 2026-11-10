@@ -181,18 +181,20 @@ To reproduce the comparison:
 ## Verification
 
 This code is a restructured version of the research code that produced the
-numbers above. The following checks compared the two on the same inputs
-(release installed from a clean clone; one NVIDIA L40S or CPU; PyTorch 2.11):
+numbers above. The following checks compared the two on the same inputs (one
+NVIDIA L40S or CPU; PyTorch 2.11):
 
 | Check | Result |
 |---|---|
-| `fs-dino-hq predict --save-base` with the released-configuration HQ checkpoint on the 46 evaluation queries (GPU) | output probability maps and masks, corrected and Stage 2 base, pixel-identical to the research code's outputs for all 46 queries |
+| `fs-dino-hq predict --save-base` with the reported HQ checkpoint on the 46 evaluation queries (GPU) | output probability maps and masks, corrected and Stage 2 base, pixel-identical to the research code's outputs for all 46 queries |
 | `fs-dino-hq evaluate` on those masks | every per-image metric identical; means and medians as in the tables above |
-| `fs-dino-hq compare` (seed 42, 10,000 resamples), corrected vs Stage 2 base | differences and 95 % intervals identical to the HQ-effect table |
-| `fs-dino-hq select-stage2` re-scoring three saved Stage 2 checkpoints (epochs 170, 175, 183) on the full validation plans (GPU) | validation losses identical to the recorded selection; epoch 183 selected |
-| `fs-dino-hq make-episodes` with the options in `docs/data.md` on the training dataset | manifests and all five plans byte-identical (SHA-256 as listed in `docs/data.md`) |
-| `distill`, `train-stage2` (five-shot) and `train-hq` for 2 short epochs on real data (CPU), research code vs release | loss histories and every saved checkpoint tensor identical; the initial adapter state of Stage 1 and the initial HQ state (hash recorded in `config.json`) equal those of the reported runs |
-| Unit tests (CPU, stub backbones, synthetic fixtures) | pass with NumPy 2.2 / Pillow 11.3 and with NumPy 2.4 / Pillow 13 |
+| `fs-dino-hq compare` (seed 42, 10,000 resamples): corrected vs Stage 2 base, and reported model vs full-grid control | differences and 95 % intervals identical to the tables |
+| One HQ training step with the point-sampled loss from the reported weights, same episodes and point-generator state | identical inputs, logits, sampled points, point labels and loss terms; gradients of all trained tensors identical on CPU, equal to 2e-5 (relative) between two GPU processes |
+| `fs-dino-hq train-hq` for three short epochs from the inputs of the reported run, with each loss | the initial HQ state of the reported run and its control (hash in `implementation_notes.md`); per-update losses, validation losses and every saved checkpoint tensor identical on CPU, within 3e-6 on GPU; on GPU the first updates of the point-sampled run equal those recorded for the reported run |
+| `fs-dino-hq select-stage2` re-scoring two saved Stage 2 checkpoints (epochs 170 and 183) on the full validation plans (GPU) | validation losses identical to the recorded selection; epoch 183 selected |
+| `fs-dino-hq train-stage2` (five-shot) for 2 short epochs on real data (CPU) | loss histories and every saved checkpoint tensor identical |
+| `fs-dino-hq make-episodes` and `fs-dino-hq distill` (checked for the first version of this code; these commands have not changed since) | manifests and plans byte-identical (SHA-256 in `docs/data.md`); loss histories and checkpoint tensors of 2 short epochs identical on CPU |
+| Unit tests (CPU, stub backbones, synthetic fixtures) | pass |
 
 Not verified: complete training runs with this code (the reported numbers come
 from the research code; full GPU runs are not bitwise reproducible), and other
