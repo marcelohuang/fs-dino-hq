@@ -10,10 +10,19 @@ frozen distilled early adapter from Stage 1. Only the HQ modules train
 
 Decoder (``dual_canonical``): a decoder pass without the HQ token gives the
 canonical Stage 2 base logits; a second pass with the HQ token gives the HQ
-residual; ``corrected = base.detach() + 1.0 * hq``. The loss is dice + BCE on
-the corrected logits at 256 x 256 (``fs_dino_hq.training.losses.hq_loss``).
-K supports per query are combined by prompt averaging
-(``fs_dino_hq.modeling.kshot``), as at inference.
+residual; ``corrected = base.detach() + 1.0 * hq``. K supports per query are
+combined by prompt averaging (``fs_dino_hq.modeling.kshot``), as at inference.
+
+Training loss (``--loss``), applied to the corrected logits:
+  point_sampled  (default) BCE + Dice at 12,544 sampled points per mask
+                 (``fs_dino_hq.training.point_loss``), read from the query mask
+                 letterboxed to 1024 x 1024. The points come from a generator of
+                 their own, seeded with ``--seed`` + 7919.
+  full_grid      dice + BCE on every cell of the 256 x 256 logit grid against
+                 the query mask resized to that grid
+                 (``fs_dino_hq.training.losses.hq_loss``).
+Validation always uses the full-grid loss, so validation values are comparable
+between the two training losses but not with the point-sampled training loss.
 
 Stage 2 input: ``--stage2-run DIR`` takes ``DIR/<ckpt_prefix>_selected.pt``
 (the prefix recorded in the Stage 2 run's config.json, ``stage2`` by default)
@@ -28,7 +37,9 @@ Schedule: the episode plans fix the episodes; epoch e trains on plan rows
 around). Validation each epoch on the first --val-episodes rows of the
 validation plan ("fast val", monitoring only) and every --full-val-every
 epochs and at the last epoch on the whole validation plan ("full val"). The
-primary checkpoint is the one with the lowest full-validation loss.
+primary checkpoint is the one with the lowest full-validation loss. One
+optimizer update is made per batch: an epoch of N episodes at batch size B is
+ceil(N / B) updates.
 
 Outputs in --save-dir:
   config.json                       options, input hashes, matched_provenance, code hashes
@@ -36,10 +47,13 @@ Outputs in --save-dir:
   stage2_selection_report.json      copy of the Stage 2 selection report (--stage2-run)
   stage2_ckpt_inspect.json, stage2_loading_report.json, sam_hq_loading_report.json
   freeze_audit.json                 trainable/frozen parameters per module
-  loss_history_fast.csv             epoch, train_loss, fast_val_loss, plan_offset
-  loss_history_full.csv             epoch, full_val_loss, n_episodes
+  loss_history_fast.csv             epoch, updates (cumulative), train_loss, train_loss_bce,
+                                    train_loss_dice, fast_val_loss, plan_offset
+  loss_history_full.csv             epoch, updates, full_val_loss, n_episodes
+  train_steps.csv                   update, epoch, loss, loss_bce, loss_dice (one row per update)
   <prefix>_last.pt, <prefix>_best_fast_val.pt, <prefix>_best_full_val.pt,
-  <prefix>_epoch_<E>.pt (--save-epochs), <prefix>_best.pt (= best full val)
+  <prefix>_epoch_<E>.pt (every full-validation epoch and --save-epochs),
+  <prefix>_best.pt (= best full val)
   checkpoint_selection_report.json
 
 ``--smoke`` loads everything, runs one training step on one batch, checks that
@@ -73,7 +87,9 @@ from fs_dino_hq.training.checkpoints import (EXPLICIT_CHECKPOINT, Stage2Selectio
 from fs_dino_hq.training.freeze import (apply_hq_freeze, build_hq_optimizer,
                                         check_frozen_unchanged, snapshot_frozen_params,
                                         verify_freeze)
-from fs_dino_hq.training.losses import hq_loss
+from fs_dino_hq.training.losses import bce_loss, dice_loss, hq_loss
+from fs_dino_hq.training.point_loss import (IMPORTANCE_SAMPLE_RATIO, NUM_POINTS, OVERSAMPLE_RATIO,
+                                            point_sampled_loss)
 from fs_dino_hq.utils.provenance import code_hashes_by_name, file_sha256, hq_state_sha256
 from fs_dino_hq.utils.seeding import rng_metadata, seed_everything, worker_init
 
@@ -90,15 +106,19 @@ CORRECTED_FORMULA = "canonical_stage2.detach() + alpha*hq"
 RESIDUAL_SCALE_MODE = "fixed"
 TRAIN_LOGITS_SOURCE = "corrected"
 EARLY_FEATURE_SOURCE = "distilled_adapter"
-LOSS_WEIGHTS = {"w_final": 1.0, "w_prior": 0.0, "w_hq": 0.0}   # hq_loss = 1.0 * seg(corrected)
+LOSS_WEIGHTS = {"w_final": 1.0, "w_prior": 0.0, "w_hq": 0.0}   # the loss is applied to the corrected logits only
 BEST_SELECTION = "full_val"
+# Point-sampled loss: resolution of its letterboxed target and the offset that
+# separates the seed of the point generator from --seed.
+HR_TARGET_SIZE = 1024
+POINT_SEED_OFFSET = 7919
 
 REQUIRED = ("synthetic_root", "train_plan", "val_plan", "dino_ckpt", "sam_ckpt",
             "sam_hq_ckpt", "early_adapter_ckpt", "save_dir")
 
 # Package files whose hashes are recorded in config.json (code_sha256).
 _CODE_FILES = ("training/train_hq.py", "training/checkpoints.py", "training/freeze.py",
-               "training/losses.py", "modeling/model.py", "modeling/hq_decoder.py",
+               "training/losses.py", "training/point_loss.py", "modeling/model.py", "modeling/hq_decoder.py",
                "modeling/correlation.py", "modeling/kshot.py", "modeling/distill_adapter.py",
                "data/letterbox.py", "data/episodes.py", "data/labelme.py")
 
@@ -149,6 +169,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     g = p.add_argument_group("recipe")
     g.add_argument("--n-shot", type=int, default=5, help="supports per episode")
+    g.add_argument("--loss", choices=["point_sampled", "full_grid"], default="point_sampled",
+                   help="training loss on the corrected logits: BCE + Dice at sampled points against "
+                        "the 1024 x 1024 letterboxed mask (default), or dice + BCE on the 256 x 256 grid")
     g.add_argument("--epochs", type=int, default=50)
     g.add_argument("--episodes-per-epoch", type=int, default=2000,
                    help="training plan rows per epoch (plan order kept, wrapping around); "
@@ -166,8 +189,8 @@ def build_parser() -> argparse.ArgumentParser:
     g = p.add_argument_group("output")
     g.add_argument("--save-dir", default=None)
     g.add_argument("--ckpt-prefix", default="hq", help="checkpoint file name prefix")
-    g.add_argument("--save-epochs", type=int, nargs="*", default=[25, 40, 50],
-                   help="epochs whose checkpoints are also kept")
+    g.add_argument("--save-epochs", type=int, nargs="*", default=[],
+                   help="further epochs whose checkpoints are kept (every full-validation epoch is)")
     g.add_argument("--num-workers", type=int, default=4)
     g.add_argument("--print-every", type=int, default=20)
     g.add_argument("--smoke", action="store_true",
@@ -282,7 +305,9 @@ def train_hq(args: argparse.Namespace) -> int:
     # ── Data ─────────────────────────────────────────────────────────────
     prep = LetterboxPreprocess(dino_size=DINO_SIZE)
     root = Path(args.synthetic_root)
-    train_ds = PlanEpisodeDataset(Path(args.train_plan), root, args.n_shot, prep)
+    point_loss = args.loss == "point_sampled"
+    train_ds = PlanEpisodeDataset(Path(args.train_plan), root, args.n_shot, prep,
+                                  hr_mask_size=HR_TARGET_SIZE if point_loss else 0)
     val_ds = PlanEpisodeDataset(Path(args.val_plan), root, args.n_shot, prep,
                                 limit=args.val_episodes)
     full_val_ds = PlanEpisodeDataset(Path(args.val_plan), root, args.n_shot, prep, limit=0)
@@ -325,11 +350,20 @@ def train_hq(args: argparse.Namespace) -> int:
         "early_feature_source": EARLY_FEATURE_SOURCE,
         "train_logits_source": TRAIN_LOGITS_SOURCE,
         **LOSS_WEIGHTS,
+        "loss": args.loss,
         "trainable_params": audit["trainable_params"],
         "trainable_top_modules": audit["trainable_top_modules"],
     }
     print(f"[INFO] initial HQ-state sha256 = {initial_hq_sha[:16]}...  "
           f"trainable = {audit['trainable_params']:,}")
+    loss_config = {"training": args.loss, "validation": "full_grid", "supervised_logits": TRAIN_LOGITS_SOURCE}
+    point_gen = None
+    if point_loss:
+        loss_config.update({"num_points": NUM_POINTS, "oversample_ratio": OVERSAMPLE_RATIO,
+                            "importance_sample_ratio": IMPORTANCE_SAMPLE_RATIO,
+                            "target_size": HR_TARGET_SIZE, "point_seed": args.seed + POINT_SEED_OFFSET})
+        point_gen = torch.Generator(device=device)      # used by the point sampling only
+        point_gen.manual_seed(args.seed + POINT_SEED_OFFSET)
     config = {**vars(args),
               "stage2_ckpt": str(stage2_path),
               "dino_size": DINO_SIZE, "feat_hw": FEAT_HW,
@@ -340,9 +374,10 @@ def train_hq(args: argparse.Namespace) -> int:
               "corrected_formula": CORRECTED_FORMULA,
               "preprocess": "letterbox_longest_side_topleft_pad_bilinear_nearest",
               "kshot_aggregation": "prompt_mean(semantic,dense);prior_mask_mean",
+              "loss_config": loss_config,
               "best_selection": BEST_SELECTION,
-              "checkpoint_selection": (f"min {BEST_SELECTION} loss "
-                                       f"(full_val every {args.full_val_every} epochs)"),
+              "checkpoint_selection": (f"min {BEST_SELECTION} loss, full-grid dice + BCE on the "
+                                       f"256 x 256 grid (full_val every {args.full_val_every} epochs)"),
               "rng": rng_metadata(args.seed), **early_meta,
               "stage2_ckpt_sha256": stage2_input["file_sha256"],
               "stage2_input": stage2_input,
@@ -353,9 +388,23 @@ def train_hq(args: argparse.Namespace) -> int:
               "code_sha256": code_hashes_by_name(_code_files())}
     (save_dir / "config.json").write_text(json.dumps(config, indent=2))
 
+    def training_loss(out: Dict, batch: Dict):
+        """(loss, BCE term, Dice term) of the corrected logits for one training batch."""
+        if point_loss:
+            target = batch["query_mask_hr"].to(device, non_blocking=True).float()
+            bce, dice = point_sampled_loss(out["final_logits"], target, generator=point_gen)
+            return bce + dice, bce, dice
+        bce = bce_loss(out["final_logits"], out["query_mask_final"])
+        dice = dice_loss(out["final_logits"], out["query_mask_final"])
+        return dice + bce, bce, dice          # = hq_loss(out)
+
+    step_log: List[Dict] = []       # one row per optimizer update, written at the end of each epoch
+    updates = 0
+
     def run_split(ds: PlanEpisodeDataset, offset: int, n_episodes: int,
-                  train: bool, epoch: int) -> float:
-        """Mean per-episode loss over plan rows [offset, offset + n_episodes)."""
+                  train: bool, epoch: int) -> Dict[str, float]:
+        """Mean per-episode loss (and its terms, when training) over plan rows [offset, offset + n_episodes)."""
+        nonlocal updates
         ds.offset = offset
         ds.limit = n_episodes
         loader = DataLoader(ds, batch_size=args.batch_size,
@@ -367,26 +416,35 @@ def train_hq(args: argparse.Namespace) -> int:
         model.train() if train else model.eval()
         if train:
             apply_hq_freeze(model)  # re-freeze after .train()
-        total, count = 0.0, 0
+        total, total_bce, total_dice, count = 0.0, 0.0, 0.0, 0
         ctx = torch.enable_grad() if train else torch.no_grad()
         with ctx:
             for step, batch in enumerate(loader, 1):
                 out = forward_kshot(model, batch, device)
-                loss = hq_loss(out)
+                bs = batch["query_dino"].shape[0]
                 if train:
+                    loss, bce, dice = training_loss(out, batch)
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
-                bs = batch["query_dino"].shape[0]
+                    updates += 1
+                    bce, dice = bce.item(), dice.item()
+                    total_bce += bce * bs
+                    total_dice += dice * bs
+                    step_log.append({"update": updates, "epoch": epoch, "loss": loss.item(),
+                                     "loss_bce": bce, "loss_dice": dice})
+                    if step % args.print_every == 0 or step == 1:
+                        print(f"[E{epoch:03d} S{step:04d}] loss={loss.item():.5f} "
+                              f"(bce {bce:.5f} + dice {dice:.5f}) cls={batch['component']}")
+                else:
+                    loss = hq_loss(out)
                 total += loss.item() * bs
                 count += bs
-                if train and (step % args.print_every == 0 or step == 1):
-                    print(f"[E{epoch:03d} S{step:04d}] loss={loss.item():.5f} "
-                          f"cls={batch['component']}")
-        return total / max(count, 1)
+        n = max(count, 1)
+        return {"loss": total / n, "loss_bce": total_bce / n, "loss_dice": total_dice / n}
 
     if args.smoke:
-        return _smoke(args, model, optimizer, train_ds, device, save_dir, corr_arch)
+        return _smoke(args, model, optimizer, train_ds, device, save_dir, corr_arch, training_loss)
 
     # ── Training ─────────────────────────────────────────────────────────
     # Checkpoints exclude the frozen DINOv2 extractors (reloaded from the
@@ -411,6 +469,7 @@ def train_hq(args: argparse.Namespace) -> int:
                     "residual_scale_initial_value": 1.0,
                     "n_shot": args.n_shot,
                     "early_feature_source": EARLY_FEATURE_SOURCE,
+                    "loss": args.loss, "updates": updates,
                     "adapter_norm_first": adapter_arch["norm_first"],
                     "adapter_dropout": adapter_arch["dropout"],
                     "hq_arch_meta": {"corr_arch": corr_arch,
@@ -436,16 +495,18 @@ def train_hq(args: argparse.Namespace) -> int:
 
     for epoch in range(1, args.epochs + 1):
         offset = ((epoch - 1) * eps) % len(train_ds.rows)
-        tr = run_split(train_ds, offset, eps, train=True, epoch=epoch)
+        tr_terms = run_split(train_ds, offset, eps, train=True, epoch=epoch)
+        tr = tr_terms["loss"]
         fast = run_split(val_ds, 0, args.val_episodes or len(val_ds.rows),
-                         train=False, epoch=epoch)
-        fast_hist.append({"epoch": epoch, "train_loss": tr, "fast_val_loss": fast,
-                          "plan_offset": offset})
+                         train=False, epoch=epoch)["loss"]
+        fast_hist.append({"epoch": epoch, "updates": updates, "train_loss": tr,
+                          "train_loss_bce": tr_terms["loss_bce"], "train_loss_dice": tr_terms["loss_dice"],
+                          "fast_val_loss": fast, "plan_offset": offset})
 
         full = None
         if epoch % full_every == 0 or epoch == args.epochs:
-            full = run_split(full_val_ds, 0, len(full_val_ds.rows), train=False, epoch=epoch)
-            full_hist.append({"epoch": epoch, "full_val_loss": full,
+            full = run_split(full_val_ds, 0, len(full_val_ds.rows), train=False, epoch=epoch)["loss"]
+            full_hist.append({"epoch": epoch, "updates": updates, "full_val_loss": full,
                               "n_episodes": len(full_val_ds.rows)})
             print(f"[EPOCH {epoch:03d}] train={tr:.5f}  fast_val={fast:.5f}  FULL_val={full:.5f}")
         else:
@@ -460,10 +521,13 @@ def train_hq(args: argparse.Namespace) -> int:
             best_full, best_full_epoch = full, epoch
             save_ckpt(save_dir / f"{pfx}_best_full_val.pt", epoch, tr, fast, full, "best_full_val")
             print(f"[INFO] best FULL-val  {best_full:.5f} @ epoch {epoch}")
-        if epoch in save_epochs:
+        # Every checkpoint that was scored on the full validation plan is kept,
+        # so another selection criterion can be applied to the same candidates later.
+        if full is not None or epoch in save_epochs:
             save_ckpt(save_dir / f"{pfx}_epoch_{epoch}.pt", epoch, tr, fast, full, f"epoch_{epoch}")
 
         _write_csv(save_dir / "loss_history_fast.csv", fast_hist)
+        _write_csv(save_dir / "train_steps.csv", step_log)
         if full_hist:
             _write_csv(save_dir / "loss_history_full.csv", full_hist)
 
@@ -473,6 +537,7 @@ def train_hq(args: argparse.Namespace) -> int:
         shutil.copyfile(save_dir / primary_src, save_dir / f"{pfx}_best.pt")
     selection = {
         "best_selection_rule": BEST_SELECTION,
+        "selection_loss": "full-grid dice + BCE on the 256 x 256 grid (also when --loss point_sampled)",
         "primary_checkpoint": primary_src,
         "primary_alias": f"{pfx}_best.pt",
         "primary_epoch": best_full_epoch, "primary_loss": best_full,
@@ -481,9 +546,8 @@ def train_hq(args: argparse.Namespace) -> int:
                           "full_val_episodes": len(full_val_ds.rows),
                           "full_val_every": full_every},
         "checkpoints_written": sorted(p.name for p in save_dir.glob(f"{pfx}_*.pt")),
-        "note": (f"full-val is over the ENTIRE val plan; fast-val is the fixed first "
-                 f"{len(val_ds)} episodes of it and is monitoring-only when "
-                 f"best_selection=full_val."),
+        "note": (f"full validation covers the whole validation plan; fast validation is its "
+                 f"first {len(val_ds)} episodes and is for monitoring only."),
     }
     (save_dir / "checkpoint_selection_report.json").write_text(json.dumps(selection, indent=2))
     print(f"[DONE] primary={primary_src} (epoch {best_full_epoch}, loss {best_full:.5f}); "
@@ -498,7 +562,7 @@ def _write_csv(path: Path, rows: List[Dict]) -> None:
         w.writerows(rows)
 
 
-def _smoke(args, model, optimizer, train_ds, device, save_dir: Path, corr_arch: str) -> int:
+def _smoke(args, model, optimizer, train_ds, device, save_dir: Path, corr_arch: str, training_loss) -> int:
     """One training step on the first plan rows; checks that only HQ tensors change."""
     print("[SMOKE] one mini-batch forward/backward ...")
     t0 = time.time()
@@ -508,7 +572,7 @@ def _smoke(args, model, optimizer, train_ds, device, save_dir: Path, corr_arch: 
     frozen_snap = snapshot_frozen_params(model)
     hq_before = {k: v.detach().cpu().clone() for k, v in model.hq_mask_decoder.hq_state_dict().items()}
     out = forward_kshot(model, batch, device)
-    loss = hq_loss(out)
+    loss, _, _ = training_loss(out, batch)
     optimizer.zero_grad()
     loss.backward()
     grad_modules = sorted({".".join(n.split(".")[:2]) for n, p in model.named_parameters()
@@ -523,7 +587,7 @@ def _smoke(args, model, optimizer, train_ds, device, save_dir: Path, corr_arch: 
     ok = (math.isfinite(float(loss.item())) and grads_finite and frozen_ok and bool(hq_changed)
           and all(m.startswith("hq_mask_decoder.") for m in grad_modules))
     report = {
-        "ok": ok, "loss": float(loss.item()),
+        "ok": ok, "loss": float(loss.item()), "loss_type": args.loss,
         "shapes": {k: list(out[k].shape) for k in (
             "adapter_embedding", "prior_logits", "canonical_base_logits", "hq_logits",
             "corrected_logits", "final_logits", "query_mask_final")},

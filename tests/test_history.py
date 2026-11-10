@@ -21,8 +21,8 @@ STAGE2_FULL_HEADER = ("epoch,full_val_loss,full_val_loss_prior,full_val_loss_fin
                       "full_val_val5_iou_prior,full_val_val5_episodes,full_val_val5_seconds,full_val_val1_loss,"
                       "full_val_val1_loss_prior,full_val_val1_loss_final,full_val_val1_iou_final,"
                       "full_val_val1_iou_prior,full_val_val1_episodes,full_val_val1_seconds")
-HQ_FAST_HEADER = "epoch,train_loss,fast_val_loss,plan_offset"
-HQ_FULL_HEADER = "epoch,full_val_loss,n_episodes"
+HQ_FAST_HEADER = "epoch,updates,train_loss,train_loss_bce,train_loss_dice,fast_val_loss,plan_offset"
+HQ_FULL_HEADER = "epoch,updates,full_val_loss,n_episodes"
 SERIES_COLUMNS = ["panel", "series", "epoch", "value"]
 
 
@@ -91,10 +91,13 @@ def make_stage2(run, report=True, extra_fast_cols=()):
 def make_hq(run):
     run.mkdir(parents=True, exist_ok=True)
     _write_csv(run / "loss_history_fast.csv", HQ_FAST_HEADER,
-               [{"epoch": e, "train_loss": 0.15 - 0.002 * e, "fast_val_loss": 0.24 - 0.001 * e,
-                 "plan_offset": 2000 * (e - 1)} for e in range(1, 11)])
+               [{"epoch": e, "updates": 1000 * e, "train_loss": 0.70 - 0.002 * e,
+                 "train_loss_bce": 0.55 - 0.001 * e, "train_loss_dice": 0.15 - 0.001 * e,
+                 "fast_val_loss": 0.24 - 0.001 * e, "plan_offset": 2000 * (e - 1)} for e in range(1, 11)])
     _write_csv(run / "loss_history_full.csv", HQ_FULL_HEADER,
-               [{"epoch": e, "full_val_loss": 0.23 - 0.001 * e, "n_episodes": 1421} for e in (5, 10)])
+               [{"epoch": e, "updates": 1000 * e, "full_val_loss": 0.23 - 0.001 * e, "n_episodes": 1421}
+                for e in (5, 10)])
+    (run / "config.json").write_text(json.dumps({"loss": "point_sampled"}))
     (run / "checkpoint_selection_report.json").write_text(json.dumps({"primary_epoch": 10}))
     # an HQ run directory holds a copy of the Stage 2 report; it must not be used
     (run / "stage2_selection_report.json").write_text(json.dumps({"status": "OK", "winner": {"epoch": 183}}))
@@ -155,9 +158,24 @@ def test_hq_detection_ignores_stage2_report_copy(tmp_path):
     assert H.detect_run_type(run) == "hq"
     hist = H.load_history(run)
     assert hist.selected_epoch == 10 and hist.selected_source.startswith("checkpoint_selection_report.json")
-    assert _names(hist) == {"train_loss", "fast_val_loss", "full_val_loss"}
+    assert _names(hist) == {"train_loss", "train_loss_bce", "train_loss_dice", "fast_val_loss", "full_val_loss"}
+    # training (point-sampled) and validation (full grid) are on different scales: separate panels
+    assert [p.key for p in hist.panels] == ["train", "loss"] and "sampled points" in hist.panels[0].title
+    assert {s.name for s in hist.panels[1].series} == {"fast_val_loss", "full_val_loss"}
+    assert hist.updates_per_epoch == 1000
     cols, rows = _series_rows(H.write_series_csv(hist, tmp_path / "hq.csv"))
-    assert cols == SERIES_COLUMNS and len(rows) == 10 + 10 + 2
+    assert cols == SERIES_COLUMNS and len(rows) == 3 * 10 + 10 + 2
+
+
+def test_hq_history_without_loss_terms_or_update_counts(tmp_path):
+    """Histories written before the loss terms were recorded still load."""
+    run = tmp_path / "hq_old"
+    run.mkdir()
+    _write_csv(run / "loss_history_fast.csv", "epoch,train_loss,fast_val_loss,plan_offset",
+               [{"epoch": e, "train_loss": 0.2, "fast_val_loss": 0.24, "plan_offset": 0} for e in (1, 2)])
+    hist = H.load_history(run)
+    assert _names(hist) == {"train_loss", "fast_val_loss"} and hist.updates_per_epoch is None
+    assert "256 grid" in hist.panels[0].title
 
 
 def test_unknown_directory_is_an_error(tmp_path):

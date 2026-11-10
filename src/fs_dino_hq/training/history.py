@@ -4,9 +4,11 @@
 
 The run type is detected from the files in RUN_DIR:
 
-  hq      ``loss_history_{fast,full}.csv`` (train-hq). Selected epoch: ``primary_epoch``
-          of ``checkpoint_selection_report.json`` (the copy of the Stage 2 selection
-          report kept in an HQ run directory is not used).
+  hq      ``loss_history_{fast,full}.csv`` (train-hq): one panel for the training loss
+          and its BCE and Dice terms, one for the validation loss (always the full-grid
+          loss, so it is not on the scale of a point-sampled training loss). Selected
+          epoch: ``primary_epoch`` of ``checkpoint_selection_report.json`` (the copy of
+          the Stage 2 selection report kept in an HQ run directory is not used).
   stage2  ``history_fast.csv`` (every epoch) and ``history_full.csv`` (full-validation
           epochs, with ``full_val_<plan>_*`` columns when several plans are validated)
           (train-stage2). Selected epoch: ``winner.epoch`` of
@@ -68,6 +70,7 @@ class History:
     selected_epoch: Optional[int] = None
     selected_source: str = "none"
     stages: List[tuple] = field(default_factory=list)       # stage1: (start epoch, end epoch, label) per stage
+    updates_per_epoch: Optional[float] = None               # optimizer updates per epoch, when recorded
 
     @property
     def selection(self) -> str:
@@ -120,11 +123,22 @@ def _primary_epoch(run: Path):
 
 def _load_hq(run: Path) -> History:
     fast, full = _read(run / HQ_FILES[0]), _read(run / HQ_FILES[1])
-    panel = Panel("loss", "HQ loss (dice + BCE)", [
-        _series(fast, "epoch", "train_loss", "train", COLORS["train"]),
+    # The training loss may be point-sampled while validation is always the
+    # full-grid loss, so the two are drawn in separate panels.
+    point = _json(run / "config.json").get("loss") == "point_sampled"
+    kind = "BCE + Dice at sampled points" if point else "dice + BCE on the 256 grid"
+    train = Panel("train", f"training loss ({kind})", [
+        _series(fast, "epoch", "train_loss", "train (sum)", COLORS["train"]),
+        _series(fast, "epoch", "train_loss_bce", "train BCE", COLORS["plan"][0], style="--"),
+        _series(fast, "epoch", "train_loss_dice", "train Dice", COLORS["plan"][2], style="--")])
+    val = Panel("loss", "validation loss (dice + BCE on the 256 grid)", [
         _series(fast, "epoch", "fast_val_loss", "fast val", COLORS["fast"]),
         _series(full, "epoch", "full_val_loss", "full val", COLORS["full"])])
-    return History("hq", [panel], *_primary_epoch(run))
+    hist = History("hq", [train, val], *_primary_epoch(run))
+    first = next((r for r in fast if _num(r.get("epoch")) and _num(r.get("updates"))), None)
+    if first:
+        hist.updates_per_epoch = _num(first["updates"]) / _num(first["epoch"])
+    return hist
 
 
 def _load_stage2(run: Path) -> History:
@@ -244,8 +258,11 @@ def plot_history(hist: History, out_dir, name: str, formats: Sequence[str] = ("p
         ax.legend(fontsize=7, framealpha=0.85, edgecolor="none")
     for ax in axes[n:]:
         ax.set_visible(False)
+    xlabel = "epoch (all stages)" if hist.stages else "epoch"
+    if hist.updates_per_epoch:
+        xlabel += f" (1 epoch = {hist.updates_per_epoch:,.0f} optimizer updates)"
     for ax in axes[max(0, n - ncols):n]:
-        ax.set_xlabel("epoch (all stages)" if hist.stages else "epoch")
+        ax.set_xlabel(xlabel)
         ax.xaxis.set_tick_params(labelbottom=True)
     fig.suptitle(f"{name} ({hist.kind})\n{hist.selection}", fontsize=10)
     paths = [Path(out_dir) / f"{name}.{fmt}" for fmt in formats]

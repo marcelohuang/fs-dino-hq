@@ -22,7 +22,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from .labelme import labelme_json_to_mask, open_image_rgb
-from .letterbox import LetterboxPreprocess
+from .letterbox import LetterboxPreprocess, letterbox_mask
 
 
 class PlanEpisodeDataset(Dataset):
@@ -30,11 +30,16 @@ class PlanEpisodeDataset(Dataset):
 
     ``offset`` and ``limit`` select the slice of plan rows served (rows wrap
     around the end of the plan); ``limit=0`` serves the whole plan.
+
+    ``hr_mask_size > 0`` adds ``query_mask_hr``: the query mask letterboxed
+    onto a canvas of that size with the same top-left convention (uint8). It
+    covers the same normalised canvas as ``query_mask``, so a point-sampled
+    loss can read it at the coordinates at which it reads the logits.
     """
 
     def __init__(self, plan_csv: Path, root: Path, n_shot: int,
                  prep: LetterboxPreprocess, label_filter=None,
-                 offset: int = 0, limit: int = 0):
+                 offset: int = 0, limit: int = 0, hr_mask_size: int = 0):
         with open(plan_csv, newline="") as f:
             rows = list(csv.DictReader(f))
         assert rows, f"empty plan: {plan_csv}"
@@ -44,7 +49,7 @@ class PlanEpisodeDataset(Dataset):
         self.rows, self.root = rows, Path(root)
         self.n_shot, self.prep, self.label_filter = n_shot, prep, label_filter
         self.offset, self.limit = offset, (limit if limit > 0 else len(rows))
-        self.epoch = 0
+        self.hr_mask_size = int(hr_mask_size)
 
     def __len__(self):
         return min(self.limit, len(self.rows))
@@ -63,7 +68,7 @@ class PlanEpisodeDataset(Dataset):
             s_mask = labelme_json_to_mask(self.root / r[f"support_{i}_json"], self.label_filter)
             sup_d.append(self.prep.image_for_dino(s_img))
             sup_m.append(self.prep.mask_for_dino(s_mask))
-        return {
+        item = {
             "support_dino": torch.stack(sup_d, 0),          # [K,3,S,S]
             "support_mask": torch.stack(sup_m, 0),          # [K,1,S,S]
             "query_dino": self.prep.image_for_dino(q_img),  # [3,S,S]
@@ -71,10 +76,13 @@ class PlanEpisodeDataset(Dataset):
             "component": r["component"],
             "episode_idx": episode_idx,
         }
+        if self.hr_mask_size > 0:
+            item["query_mask_hr"] = letterbox_mask(q_mask, self.hr_mask_size).to(torch.uint8)
+        return item
 
 
 def collate_plan_episodes(items: List[Dict]) -> Dict:
-    return {
+    out = {
         "support_dino": torch.stack([it["support_dino"] for it in items], 0),
         "support_mask": torch.stack([it["support_mask"] for it in items], 0),
         "query_dino": torch.stack([it["query_dino"] for it in items], 0),
@@ -82,3 +90,6 @@ def collate_plan_episodes(items: List[Dict]) -> Dict:
         "component": [it["component"] for it in items],
         "episode_idx": [it["episode_idx"] for it in items],
     }
+    if "query_mask_hr" in items[0]:
+        out["query_mask_hr"] = torch.stack([it["query_mask_hr"] for it in items], 0)
+    return out

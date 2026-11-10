@@ -1,5 +1,5 @@
 {
-  "_comment": "HQ branch on the selected five-shot Stage 2 checkpoint (released configuration).",
+  "_comment": "HQ branch on the selected five-shot Stage 2 checkpoint, trained with the point-sampled BCE + Dice loss (reported configuration). \"loss\": \"full_grid\" gives the control run of docs/results.md.",
   "synthetic_root": "${DATA_DIR}/synthetic",
   "train_plan": "${DATA_DIR}/episodes/train_episode_plan_5shot.csv",
   "val_plan": "${DATA_DIR}/episodes/val_episode_plan_5shot.csv",
@@ -12,6 +12,7 @@
   "sam_hq_ckpt": "${WEIGHTS_DIR}/sam_hq_vit_h.pth",
   "save_dir": "${OUTPUT_DIR}/hq_five_shot",
   "n_shot": 5,
+  "loss": "point_sampled",
   "epochs": 50,
   "episodes_per_epoch": 2000,
   "val_episodes": 300,
@@ -21,7 +22,6 @@
   "weight_decay": 0.0001,
   "seed": 42,
   "ckpt_prefix": "hq",
-  "save_epochs": [25, 40, 50],
   "num_workers": 6,
   "print_every": 20
 }

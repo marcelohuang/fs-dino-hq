@@ -194,15 +194,14 @@ EXPECTED_CKPT_KEYS = {
     "train_logits_source", "residual_scale_mode", "residual_scale_value",
     "residual_scale_initial_value", "n_shot", "early_feature_source", "adapter_norm_first",
     "adapter_dropout", "hq_arch_meta", "dino_excluded", "train_loss", "fast_val_loss",
-    "full_val_loss", "selection_tag", "config"}
+    "full_val_loss", "selection_tag", "config", "loss", "updates"}
 
 
 def test_train_hq_end_to_end(hq_inputs, monkeypatch):
     out = hq_inputs["tmp"] / "hq"
     ret = train_hq.main(hq_inputs["args"] + [
         "--stage2-run", str(hq_inputs["run"]), "--save-dir", str(out), "--epochs", "2",
-        "--episodes-per-epoch", "4", "--val-episodes", "2", "--full-val-every", "1",
-        "--save-epochs", "1", "2"])
+        "--episodes-per-epoch", "4", "--val-episodes", "2", "--full-val-every", "1"])
     assert ret == 0
     for name in ("config.json", "freeze_audit.json", "stage2_input_provenance.json",
                  "stage2_selection_report.json", "stage2_ckpt_inspect.json",
@@ -220,10 +219,18 @@ def test_train_hq_end_to_end(hq_inputs, monkeypatch):
 
     fast = (out / "loss_history_fast.csv").read_text().splitlines()
     full = (out / "loss_history_full.csv").read_text().splitlines()
-    assert fast[0] == "epoch,train_loss,fast_val_loss,plan_offset"
-    assert full[0] == "epoch,full_val_loss,n_episodes"
-    assert [r.split(",")[3] for r in fast[1:]] == ["0", "4"]           # 6-row plan, 4 per epoch
-    assert [r.split(",")[2] for r in full[1:]] == ["6", "6"]
+    assert fast[0] == "epoch,updates,train_loss,train_loss_bce,train_loss_dice,fast_val_loss,plan_offset"
+    assert full[0] == "epoch,updates,full_val_loss,n_episodes"
+    assert [r.split(",")[-1] for r in fast[1:]] == ["0", "4"]          # 6-row plan, 4 per epoch
+    assert [r.split(",")[-1] for r in full[1:]] == ["6", "6"]
+    assert [r.split(",")[1] for r in fast[1:]] == ["2", "4"]           # 4 episodes at batch 2 = 2 updates
+    # default loss: point-sampled BCE + Dice; one row per optimizer update with both terms
+    steps = [r.split(",") for r in (out / "train_steps.csv").read_text().splitlines()]
+    assert steps[0] == ["update", "epoch", "loss", "loss_bce", "loss_dice"]
+    assert [(r[0], r[1]) for r in steps[1:]] == [("1", "1"), ("2", "1"), ("3", "2"), ("4", "2")]
+    assert all(abs(float(r[2]) - float(r[3]) - float(r[4])) < 1e-3 * abs(float(r[2])) for r in steps[1:])
+    e1 = fast[1].split(",")
+    assert abs(float(e1[2]) - float(e1[3]) - float(e1[4])) < 1e-3 * abs(float(e1[2]))
 
     cfg = json.loads((out / "config.json").read_text())
     mp = cfg["matched_provenance"]
@@ -231,6 +238,11 @@ def test_train_hq_end_to_end(hq_inputs, monkeypatch):
     assert mp["stage2_ckpt_sha256"] == prov["file_sha256"] == cfg["stage2_ckpt_sha256"]
     assert len(mp["initial_hq_state_sha256"]) == 64 and mp["best_selection"] == "full_val"
     assert (mp["w_final"], mp["w_prior"], mp["w_hq"]) == (1.0, 0.0, 0.0)
+    assert mp["loss"] == cfg["loss"] == "point_sampled"
+    assert cfg["loss_config"] == {"training": "point_sampled", "validation": "full_grid",
+                                  "supervised_logits": "corrected", "num_points": 12544,
+                                  "oversample_ratio": 3.0, "importance_sample_ratio": 0.75,
+                                  "target_size": 1024, "point_seed": 42 + 7919}
     assert not [k for k in list(cfg) + list(mp) if "cldice" in k or "photometric" in k]
     assert cfg["decoder_mode"] == "dual_canonical" and cfg["residual_scale_mode"] == "fixed"
     assert cfg["adapter_arch"] == {"norm_first": True, "dropout": 0.0}
@@ -246,6 +258,7 @@ def test_train_hq_end_to_end(hq_inputs, monkeypatch):
     assert best["early_feature_source"] == "distilled_adapter" and best["n_shot"] == 5
     assert best["adapter_norm_first"] is True and best["adapter_dropout"] == 0.0
     assert best["selection_tag"] == "best_full_val" and best["epoch"] == sel["primary_epoch"]
+    assert best["loss"] == "point_sampled" and best["updates"] == 2 * best["epoch"]
     assert best["hq_module_names"] == sorted(HQMaskDecoder.HQ_MODULE_NAMES)
     ms = best["model_state"]
     assert not any(k.startswith(("last_extractor.", "layer3_extractor.")) for k in ms)
@@ -333,3 +346,25 @@ def test_train_hq_stage2_gate_refusals(hq_inputs, case):
         train_hq.main(args)
     assert e.value.code != 0
     assert not (tmp / "hq" / "config.json").exists()
+
+
+def test_full_grid_loss_and_point_loss_differ_only_in_the_training_objective(hq_inputs):
+    """--loss full_grid: the training loss is the validation loss function; same model
+    initialisation, data order and checkpoint layout as the default."""
+    runs = {}
+    for loss in ("point_sampled", "full_grid"):
+        out = hq_inputs["tmp"] / f"hq_{loss}"
+        assert train_hq.main(hq_inputs["args"] + [
+            "--stage2-run", str(hq_inputs["run"]), "--save-dir", str(out), "--epochs", "1",
+            "--episodes-per-epoch", "2", "--val-episodes", "2", "--full-val-every", "1",
+            "--loss", loss]) == 0
+        runs[loss] = (json.loads((out / "config.json").read_text()),
+                      (out / "train_steps.csv").read_text().splitlines()[1].split(","),
+                      torch.load(out / "hq_epoch_1.pt", map_location="cpu", weights_only=True))
+    (cp, sp, kp), (cg, sg, kg) = runs["point_sampled"], runs["full_grid"]
+    assert cp["matched_provenance"]["initial_hq_state_sha256"] == cg["matched_provenance"]["initial_hq_state_sha256"]
+    assert cg["loss_config"] == {"training": "full_grid", "validation": "full_grid", "supervised_logits": "corrected"}
+    assert kg["loss"] == "full_grid" and set(kg) == set(kp) == EXPECTED_CKPT_KEYS
+    assert sp[2] != sg[2]                                   # different objective on the same first batch
+    assert abs(float(sg[2]) - float(sg[3]) - float(sg[4])) < 1e-3 * abs(float(sg[2]))
+    assert not all(torch.equal(v, kg["hq_state"][k]) for k, v in kp["hq_state"].items())
