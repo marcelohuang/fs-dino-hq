@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 
+from conftest import check_gpu_error, requires_gpu
 from stubs import StubDino
 
 import fs_dino_hq.training.distill as distill
@@ -129,6 +130,37 @@ def without_seconds(rows):
 
 def states_equal(a, b):
     return a.keys() == b.keys() and all(torch.equal(a[k], b[k]) for k in a)
+
+
+# GPU checks. On a GPU two identical runs of the scenarios below are not bit-identical: the backward pass of
+# bilinear interpolation is not deterministic, and Adam turns gradient differences of round-off size into steps
+# of the size of the learning rate. Measured on an NVIDIA L40S (torch 2.11, CUDA 12.8) over 9 to 12 identical
+# reruns, history metrics differed by up to 7.2e-3 and adapter weights by up to 2.5e-3; runs with a cached
+# teacher and resumed runs differed from their reference by no more than that (up to 5.4e-3 and 2.1e-3 over 16
+# repetitions). The tolerances are about four times the rerun values: the compared run has to stay as close to
+# the reference as a rerun of the reference does. That bounds gross errors only; it cannot show that a resume
+# restores the state exactly, which is what the CPU tests above check.
+GPU_HISTORY_TOL = 3e-2
+GPU_STATE_TOL = 1e-2
+EXACT_HISTORY_COLUMNS = ("stage", "res", "epoch_in_stage", "global_epoch", "event", "lr")
+
+
+def history_error(rows_a, rows_b):
+    """Largest absolute difference over the metric columns; schedule columns must be identical."""
+    assert len(rows_a) == len(rows_b)
+    err = 0.0
+    for ra, rb in zip(rows_a, rows_b):
+        assert [ra[c] for c in EXACT_HISTORY_COLUMNS] == [rb[c] for c in EXACT_HISTORY_COLUMNS]
+        for c in ra:
+            if c in EXACT_HISTORY_COLUMNS or c in ("seconds", "adapter_sha16") or ra[c] == rb[c] == "":
+                continue
+            err = max(err, abs(float(ra[c]) - float(rb[c])))
+    return err
+
+
+def state_error(a, b):
+    assert a.keys() == b.keys()
+    return max(float((a[k].double() - b[k].double()).abs().max()) for k in a if a[k].is_floating_point())
 
 
 # ── letterbox views ──────────────────────────────────────────────────────────
@@ -295,7 +327,7 @@ def test_smoke_run_final_adapter(tmp_path, stub_backbones):
     assert math.isclose(res["selected_best"]["diag"]["mse"], res["best_diag_mse_during_training"], rel_tol=1e-6)
 
 
-def test_early_adapter_fits_and_reuses_the_pca_teacher(tmp_path, stub_backbones, monkeypatch):
+def test_early_adapter_fits_and_reuses_the_pca_teacher(tmp_path, stub_backbones, monkeypatch, cpu_only):
     pool = make_pool(tmp_path / "pool", n_train=4, n_val=2)
     run = tmp_path / "early"
     assert distill.main(base_args(pool, run, adapter="early", extra=["--smoke"])) == 0
@@ -319,7 +351,7 @@ def test_early_adapter_fits_and_reuses_the_pca_teacher(tmp_path, stub_backbones,
     assert without_seconds(read_history(run2 / "history.csv")[1]) == without_seconds(read_history(run / "history.csv")[1])
 
 
-def test_resume_reproduces_the_uninterrupted_run(tmp_path, stub_backbones, monkeypatch):
+def test_resume_reproduces_the_uninterrupted_run(tmp_path, stub_backbones, monkeypatch, cpu_only):
     pool = make_pool(tmp_path / "pool", n_train=4, n_val=2)
 
     full = tmp_path / "full"
@@ -379,6 +411,68 @@ def test_resume_reproduces_the_uninterrupted_run(tmp_path, stub_backbones, monke
     # a different schedule is refused
     with pytest.raises(SystemExit):
         distill.main(base_args(pool, mid, stages="28:2,42:2", extra=["--resume"]))
+
+
+@requires_gpu
+def test_gpu_cached_pca_teacher_gives_the_same_run_within_rerun_noise(tmp_path, stub_backbones, monkeypatch):
+    pool = make_pool(tmp_path / "pool", n_train=4, n_val=2)
+    run, run2 = tmp_path / "early", tmp_path / "early_cached"
+    assert distill.main(base_args(pool, run, adapter="early", extra=["--smoke"])) == 0
+    monkeypatch.setattr(distill, "fit_pca_teacher", None)          # a refit would fail
+    assert distill.main(base_args(pool, run2, adapter="early",
+                                  extra=["--smoke", "--pca-cache", str(run / "pca_teacher_1280to256.pt")])) == 0
+    # the teacher itself is exact on any device: the cached basis is the same file
+    assert (run2 / "pca_teacher_1280to256.pt").read_bytes() == (run / "pca_teacher_1280to256.pt").read_bytes()
+    check_gpu_error("early adapter, cached teacher: history",
+                    history_error(read_history(run / "history.csv")[1], read_history(run2 / "history.csv")[1]),
+                    GPU_HISTORY_TOL)
+    states = [torch.load(r / "early_adapter_best.pt", map_location="cpu", weights_only=False)["early_adapter_state"]
+              for r in (run, run2)]
+    check_gpu_error("early adapter, cached teacher: weights", state_error(*states), GPU_STATE_TOL)
+
+
+@requires_gpu
+def test_gpu_resume_matches_the_uninterrupted_run_within_rerun_noise(tmp_path, stub_backbones, monkeypatch):
+    pool = make_pool(tmp_path / "pool", n_train=4, n_val=2)
+    full = tmp_path / "full"
+    assert distill.main(base_args(pool, full)) == 0
+    ref_rows = read_history(full / "history.csv")[1]
+    ref_last = torch.load(full / "c2f_last.pt", map_location="cpu", weights_only=False)
+
+    def check(run, name):
+        last = torch.load(run / "c2f_last.pt", map_location="cpu", weights_only=False)
+        # where the run stands is exact on any device
+        assert (last["stage_idx"], last["epoch_in_stage"]) == (ref_last["stage_idx"], ref_last["epoch_in_stage"])
+        check_gpu_error(f"distillation, {name}: history",
+                        history_error(ref_rows, read_history(run / "history.csv")[1]), GPU_HISTORY_TOL)
+        check_gpu_error(f"distillation, {name}: weights",
+                        state_error(ref_last["adapter_state"], last["adapter_state"]), GPU_STATE_TOL)
+
+    split = tmp_path / "split"
+    assert distill.main(base_args(pool, split, extra=["--stop-after-stage", "1"])) == 0
+    assert distill.main(base_args(pool, split, extra=["--resume"])) == 0
+    check(split, "resume at a stage boundary")
+
+    class Interrupted(Exception):
+        pass
+
+    real_run_epoch = distill.run_epoch
+    calls = {"train": 0, "armed": True}
+
+    def interrupting(*a, **k):
+        if (len(a) > 5 and a[5] is not None) or k.get("optimizer") is not None:
+            calls["train"] += 1
+            if calls["armed"] and calls["train"] == 2:
+                raise Interrupted
+        return real_run_epoch(*a, **k)
+
+    monkeypatch.setattr(distill, "run_epoch", interrupting)
+    mid = tmp_path / "mid"
+    with pytest.raises(Interrupted):
+        distill.main(base_args(pool, mid))
+    calls["armed"] = False
+    assert distill.main(base_args(pool, mid, extra=["--resume"])) == 0
+    check(mid, "resume inside a stage")
 
 
 # ── make-distill-split ───────────────────────────────────────────────────────

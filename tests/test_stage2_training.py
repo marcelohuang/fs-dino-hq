@@ -4,6 +4,7 @@ to end (one-shot with --resume, five-shot with two validation plans).
 
 CPU only: stub DINOv2, real SAM prompt encoder / mask decoder modules with
 random weights, tiny synthetic LabelMe dataset."""
+import csv
 import json
 import os
 
@@ -11,6 +12,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from conftest import check_gpu_error, requires_gpu
 from stubs import StubDino, StubSam, make_tiny_photo_dataset
 
 from fs_dino_hq.modeling.distill_adapter import BottleneckAdapter as StudentAdapter
@@ -307,7 +309,7 @@ def test_trainer_one_shot_end_to_end_with_resume(tmp_path, tiny_setup):
     assert [int(r.split(",")[1]) for r in hist[1:]] == [0, 4]
 
 
-def test_resume_continues_the_same_trajectory(tmp_path, tiny_setup):
+def test_resume_continues_the_same_trajectory(tmp_path, tiny_setup, cpu_only):
     """Two epochs in one go == one epoch + --resume (same weights at the end)."""
     root, plans, adapter_ck = tiny_setup
     base = ["--synthetic-root", str(root), "--train-plan", str(plans[("train", 1)]),
@@ -325,6 +327,50 @@ def test_resume_continues_the_same_trajectory(tmp_path, tiny_setup):
     other = [("4" if a == "2" and base[i - 1] == "--episodes-per-epoch" else a) for i, a in enumerate(base)]
     with pytest.raises(SystemExit, match="REFUSING to resume"):
         trainer.main(other + ["--save-dir", str(tmp_path / "b"), "--epochs", "3", "--resume"])
+
+
+# GPU check of the same scenario. Two identical GPU runs are not bit-identical (see tests/test_distill.py).
+# Measured on an NVIDIA L40S (torch 2.11, CUDA 12.8): over 12 identical reruns of the two-epoch run and 26
+# correct resumes, the recorded losses and IoUs differed from the reference by up to 1.4e-4 and the weights by
+# up to 1.7e-4. A resume that does not restore the optimizer state moved the second-epoch validation loss by
+# 4.9e-3 (5 of 5 runs) but the weights by only 2.0e-4. The history tolerance therefore lies between the two
+# (about 7 times the largest correct error, 5 times below the faulty one) and is the check that detects such a
+# fault; the weight tolerance (6 times the largest correct error) bounds gross errors only.
+GPU_STAGE2_HISTORY_TOL = 1e-3
+GPU_STAGE2_STATE_TOL = 1e-3
+
+
+@requires_gpu
+def test_gpu_resume_matches_the_uninterrupted_run_within_rerun_noise(tmp_path, tiny_setup):
+    root, plans, adapter_ck = tiny_setup
+    base = ["--synthetic-root", str(root), "--train-plan", str(plans[("train", 1)]),
+            "--val-plan", str(plans[("val", 1)]), "--adapter-ckpt", str(adapter_ck),
+            "--dino-ckpt", "unused", "--sam-ckpt", "unused", "--num-workers", "0", "--batch-size", "2",
+            "--episodes-per-epoch", "2", "--val-episodes", "2", "--full-val-every", "0",
+            "--best-selection", "fast_val", "--seed", "5"]
+    trainer.main(base + ["--save-dir", str(tmp_path / "a"), "--epochs", "2"])
+    trainer.main(base + ["--save-dir", str(tmp_path / "b"), "--epochs", "1"])
+    trainer.main(base + ["--save-dir", str(tmp_path / "b"), "--epochs", "2", "--resume"])
+    assert json.loads((tmp_path / "a" / "config.json").read_text())["device"] == "cuda"
+
+    def history(run):
+        with open(tmp_path / run / "history_fast.csv", newline="") as f:
+            return list(csv.DictReader(f))
+
+    ha, hb = history("a"), history("b")
+    exact = ("epoch", "plan_offset", "train_episodes", "fast_val_episodes")     # the schedule is exact on any device
+    assert [[r[c] for c in exact] for r in ha] == [[r[c] for c in exact] for r in hb] and len(ha) == 2
+    metrics = [c for c in ha[0] if c not in exact and not c.endswith(("_seconds", "_peak_mem_gb"))]
+    assert {"train_loss", "fast_val_loss", "fast_val_iou_final"} <= set(metrics)
+    check_gpu_error("Stage 2 resume: history",
+                    max(abs(float(x[c]) - float(y[c])) for x, y in zip(ha, hb) for c in metrics),
+                    GPU_STAGE2_HISTORY_TOL)
+    sa = torch.load(tmp_path / "a" / "stage2_last.pt", map_location="cpu", weights_only=False)["stage2_model"]
+    sb = torch.load(tmp_path / "b" / "stage2_last.pt", map_location="cpu", weights_only=False)["stage2_model"]
+    assert sa.keys() == sb.keys()
+    check_gpu_error("Stage 2 resume: weights",
+                    max(float((sa[k].double() - sb[k].double()).abs().max()) for k in sa if sa[k].is_floating_point()),
+                    GPU_STAGE2_STATE_TOL)
 
 
 def test_trainer_five_shot_with_two_validation_plans(tmp_path, tiny_setup):
