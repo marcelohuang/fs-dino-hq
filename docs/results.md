@@ -48,35 +48,20 @@ real-photo numbers cannot be reproduced without access to the same images.
   seeds was not measured.
 * One support set. Every result on the 46 photographs uses the same five
   supports; the sensitivity to the choice of supports was not measured there.
-* Dependence on the supports. Measured on the synthetic validation set with
-  the reported checkpoint (1,421 queries; only the supports of a query were
-  changed; IoU against the 1024 x 1024 letterboxed mask, 0.800 with the
-  planned supports):
-  * Five other supports of the same structural component change the IoU of a
-    query by 0.0007 at the median (95th percentile 0.009, largest 0.17); the
-    mean changes by +0.0003 [-0.0001, +0.0007]. One support instead of five
-    lowers the mean by 0.0015 [0.0011, 0.0019]. The order of the supports
-    changes at most two cells of the 256 x 256 output (numerical).
-  * Five supports of another structural component lower the mean IoU by
-    0.138 [0.125, 0.151], very unevenly: for 13 % of the queries the new
-    mask overlaps the original one by less than half (IoU), and one of the
-    nine validation scene groups accounts for about 60 % of the drop.
-  * The content of the support masks has little effect. Masks covering the
-    whole support image change the mean IoU by +0.0007 [-0.0002, +0.0016]
-    and inverted masks by -0.0016 [-0.0035, -0.00003]; giving the query itself
-    with its ground-truth mask as the support does not improve on the
-    planned supports (+0.0004 [-0.0006, +0.0015]). The last three inputs
-    never occur in training, so they describe the trained model, not
-    ordinary use.
-
-  The output therefore depends on the support images, mainly on the kind of
-  scene they show, and hardly on what the support masks mark. The sparse
-  prompt computed from the supports behaves like a code for the component:
-  its cosine between two support sets of the same component is 0.96 at the
-  median, and 0.05 between sets of different components. Every training
-  and validation episode has the same foreground class, so whether the
-  supports can select the foreground was not tested, and how far these
-  results carry over to photographs is not known.
+* Dependence on the supports. On the synthetic validation set (1,421
+  queries, reported checkpoint, only the supports of a query changed; IoU
+  against the 1024 x 1024 letterboxed mask) the output depends on the
+  supports. Five other supports of the same structural component change the
+  IoU of a query by 0.0007 at the median (95th percentile 0.009, largest
+  0.17); five supports of another component lower the mean IoU from 0.800 to
+  0.662, strongly for some queries and hardly for others. The output is
+  relatively insensitive to several perturbations of the support masks: masks
+  covering the whole support image or inverted masks change the mean IoU by
+  +0.0007 and -0.0016, although individual queries change substantially (by
+  up to 0.23 and 0.87). These perturbed inputs do not occur in training, the
+  data have a single foreground class and nothing was measured on
+  photographs, so the numbers describe this model on these data and do not
+  establish how the supports are used.
 * Checkpoint choice. Epoch 45 was selected during training, before any
   evaluation on the 46 queries, as the epoch with the lowest validation loss
   among ten validated epochs. That loss compares the logits with the query
