@@ -46,21 +46,47 @@ real-photo numbers cannot be reproduced without access to the same images.
   reproducible. Differences between two configurations below are differences
   between two single runs; whether they exceed the variation between training
   seeds was not measured.
-* One support set. Every result uses the same five supports; the sensitivity
-  to the choice of supports was not measured.
-* Dependence on the supports. In every training episode the supports and the
-  query show the same kind of object, so training never requires the supports
-  to decide what the foreground is, and how much the output of the trained
-  model changes with the supports has not been measured. On the synthetic
-  validation set the Stage 2 model scored nearly the same with one support as
-  with five (decoder IoU 0.790 and 0.791 at the last epoch).
-* Checkpoint choice. The HQ checkpoint is the one with the lowest validation
-  loss among ten validated epochs. That loss compares the logits with the
-  query mask resized to 256 x 256 by nearest-neighbour index, which places the
-  target about half a cell off the logit grid. Ranking the saved checkpoints
-  of the reported run by IoU at native resolution on the same validation
-  episodes prefers epoch 40 instead of 45; on the 46 queries epoch 40 reaches
-  an IoU of 0.4160, 0.0011 [0.0004, 0.0018] below epoch 45.
+* One support set. Every result on the 46 photographs uses the same five
+  supports; the sensitivity to the choice of supports was not measured there.
+* Dependence on the supports. Measured on the synthetic validation set with
+  the reported checkpoint (1,421 queries; only the supports of a query were
+  changed; IoU against the 1024 x 1024 letterboxed mask, 0.800 with the
+  planned supports):
+  * Five other supports of the same structural component change the IoU of a
+    query by 0.0007 at the median (95th percentile 0.009, largest 0.17); the
+    mean changes by +0.0003 [-0.0001, +0.0007]. One support instead of five
+    lowers the mean by 0.0015 [0.0011, 0.0019]. The order of the supports
+    changes at most two cells of the 256 x 256 output (numerical).
+  * Five supports of another structural component lower the mean IoU by
+    0.138 [0.125, 0.151], very unevenly: for 13 % of the queries the new
+    mask overlaps the original one by less than half (IoU), and one of the
+    nine validation scene groups accounts for about 60 % of the drop.
+  * The content of the support masks has little effect. Masks covering the
+    whole support image change the mean IoU by +0.0007 [-0.0002, +0.0016]
+    and inverted masks by -0.0016 [-0.0035, -0.00003]; giving the query itself
+    with its ground-truth mask as the support does not improve on the
+    planned supports (+0.0004 [-0.0006, +0.0015]). The last three inputs
+    never occur in training, so they describe the trained model, not
+    ordinary use.
+
+  The output therefore depends on the support images, mainly on the kind of
+  scene they show, and hardly on what the support masks mark. The sparse
+  prompt computed from the supports behaves like a code for the component:
+  its cosine between two support sets of the same component is 0.96 at the
+  median, and 0.05 between sets of different components. Every training
+  and validation episode has the same foreground class, so whether the
+  supports can select the foreground was not tested, and how far these
+  results carry over to photographs is not known.
+* Checkpoint choice. Epoch 45 was selected during training, before any
+  evaluation on the 46 queries, as the epoch with the lowest validation loss
+  among ten validated epochs. That loss compares the logits with the query
+  mask resized to 256 x 256 by nearest-neighbour index, which places the
+  target about half a cell off the logit grid. A later ranking of the saved
+  checkpoints by IoU at native resolution on the same validation episodes
+  prefers epoch 40. Epoch 45 was then kept as the reported checkpoint by a
+  decision taken after the results of both checkpoints on the 46 queries were
+  known (epoch 40: IoU 0.4160, 0.0011 [0.0004, 0.0018] below epoch 45). That
+  second decision is not a validation-only selection.
 
 ## Reported configuration (five-shot Stage 2, HQ branch with the point-sampled loss)
 
@@ -116,10 +142,11 @@ and displaced by about half a cell relative to the logit grid (see
 smoothing constants also differ. The gain can therefore not be attributed to
 point sampling.
 
-Most of it appears to come from the alignment of the target. Translating the
+A translation test on the saved outputs is consistent with the alignment of
+the target accounting for a substantial part of the gain. Translating the
 saved probability maps by half a logit cell towards the upper left, the
 correction that the displaced target predicts, and thresholding them again
-gives (same 46 queries; a test on saved outputs, no retraining):
+gives (same 46 queries, no retraining):
 
 | Output | IoU as predicted | IoU translated by -0.5 cell | Difference [95 % interval] |
 |---|---|---|---|
@@ -130,9 +157,14 @@ gives (same 46 queries; a test on saved outputs, no retraining):
 The reported model is centred (any translation lowers its IoU), whereas the
 control and the Stage 2 base, both trained on the displaced 256 x 256
 target, improve when moved back. Against the translated control the reported
-model leads by +0.0018 [0.0000, +0.0036] instead of +0.0084. A control
-trained with a centred full-grid target would be the direct test; it has not
-been run.
+model leads by +0.0018 [-0.00002, +0.0036] (28 better, 18 worse) instead of
++0.0084; the interval includes zero, and its lower endpoint lies between
+-0.00008 and +0.00002 over 20 bootstrap seeds, so this remaining difference
+is not distinguishable from zero. The test does not decompose the effect of
+training: a translated prediction is not a model trained on an aligned
+target. A control trained with a centred full-grid target would be the
+direct test of alignment; it has not been run, and it would still not
+separate point sampling from target resolution and Dice smoothing.
 
 The reported model also recovers more of the annotated bars (higher recall
 on thin structures) and produces more small separate components (higher
